@@ -104,6 +104,8 @@ win.release()                                              # hand the foreground
 
 item = win.ax.at(640, 420, app="Notepad")
 win.ax.perform(item["element_index"], "invoke")
+win.ax.click(item["element_index"])      # click the element's center — no coordinates
+win.ax.hover(item["element_index"])      # hover it so its tooltip fires
 
 win.script("Get-Process | Select-Object -First 3 Name")
 ```
@@ -111,7 +113,10 @@ win.script("Get-Process | Select-Object -First 3 Name")
 `win.click()` is raw coordinate input; it never guesses a UIA action. For
 semantic actions use `win.ax.at()` + `win.ax.perform()`, and fill text fields
 with `win.ax.set_value()` (verified by read-back) when an element exposes a
-ValuePattern — no keystrokes at all.
+ValuePattern — no keystrokes at all. `win.ax.click()` / `win.ax.hover()` act
+on the element's own BoundingRectangle center: coordinates never leave the
+harness, so no coordinate-space mismatch is possible — prefer them over
+copying frame values into `win.click()` yourself.
 
 `win.hover(x, y)` delivers a real hover (physical cursor, or pen hover when
 SendInput is filtered) so tooltips and hover-only UI appear; `win.move(x, y)`
@@ -171,8 +176,21 @@ with x/y, `type` with x/y, `hover`) accepts `coordinate_space`; the
 normalized grid works for all of them.
 
 When semantic identity matters, prefer element centers from the ax tree
-(`BoundingRectangle`) over vision-estimated pixels — they survive layout
-shifts and need no scaling at all.
+over vision-estimated pixels — they survive layout shifts and need no
+scaling at all. ax output reports frames in the pixel space of your latest
+`win.see()` screenshot of that window (the `frame` key, alongside
+`"frame_space": "screenshot"` in `state`), so they drop straight into the
+default coordinate space. Without a matching screenshot the raw physical
+screen pixels are reported under `frame_screen` instead — those only pair
+with `coordinate_space="screen"`, never the default. Cleanest of all is
+keeping numbers out of the loop: `win.ax.click(element_index)` /
+`win.ax.hover(element_index)`.
+
+Target apps by exe name when titles can collide — resolution prefers an
+exact process-name match (`"Discord.exe"`, or bare `"Discord"`), then an
+exact title, and only then substrings, so a window whose title merely
+mentions the name (a VS Code tab titled "… Discord …") never hijacks the
+query.
 
 ## Minimize round trips
 
@@ -192,9 +210,14 @@ shifts and need no scaling at all.
 3. Prefer a known keyboard route; use a verified coordinate for a visible,
    low-risk target.
 4. Use targeted `win.ax` only when semantic identity or state matters. For
-   CEF/Electron custom-drawn UI (music players, chat apps, game launchers)
-   the ax tree is often read-only or empty — go straight to screenshot +
-   coordinate clicks there instead of spending rounds on UIA patterns.
+   CEF/Electron custom-drawn UI (chat apps, music players, game launchers)
+   the tree fills lazily: `state`/`ax.query`/`ax.at` automatically warm a
+   near-empty CEF tree with a brief (usually invisible, cloaked) foreground
+   round, so give ax one chance before falling back to pixels. Icon-only
+   controls (server/avatar images) often expose only generic names — hover
+   them (`win.ax.hover`) and read the tooltip from a `win.see()`. If a dump
+   still comes back near-empty with a `note`, go straight to screenshot +
+   coordinate clicks instead of spending more rounds on UIA.
 5. Use `delivery="background"` only for apps already proven to accept it on
    this machine (classic Win32 controls, UIA patterns) — it is the quiet
    opt-in, not the default to probe with.
@@ -221,6 +244,9 @@ with repeated keys, clicks, deletion loops, or bulk input.
   deliberately and say so).
 - Background delivery NEVER activates, raises, or moves the cursor. Occluded
   targets refuse with `background_occluded` rather than being raised.
+- ax queries against CEF/Electron windows (`Chrome_WidgetWin*`) whose tree is
+  near-empty auto-warm it with a brief cloaked foreground takeover; the
+  previous foreground is restored when the warm-up round ends.
 - Elevated (Administrator) targets are detected up front (UIPI preflight) and
   refused with `background_uipi_blocked`; run the harness elevated to drive them.
 - The animated pointer is click-through and never moves the physical cursor;

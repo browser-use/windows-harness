@@ -708,9 +708,14 @@ class Windows:
         max_depth: int = 12,
         max_nodes: int = 1500,
     ) -> dict[str, Any]:
-        state = self.ax.dump(app, max_depth=max_depth, max_nodes=max_nodes)
+        # dump(screenshot=True) shoots FIRST, so its frames are reported in
+        # this very screenshot's pixel space.
+        state = self.ax.dump(
+            app, max_depth=max_depth, max_nodes=max_nodes, screenshot=screenshot
+        )
         state["windows"] = self.windows(app)
-        state["screenshot"] = self.see(app) if screenshot else None
+        if not screenshot:
+            state["screenshot"] = None
         return state
 
     snapshot = get_app_state

@@ -235,52 +235,75 @@ def _no_match_error(query: str, windows: list[dict]) -> str:
 def resolve_hwnd(query: str) -> tuple[int, dict]:
     """Resolve a PID, exe name, path fragment, or window title to one window.
 
+    Matching is tiered so a loose title substring can never outrank an exact
+    process name: a VS Code window whose title merely mentions "Discord" must
+    not win the query "Discord" over Discord.exe itself.
+
     Raises :class:`HarnessError` on no matches or ambiguity, mirroring the
     macOS harness's ``_resolve_app`` behaviour.
     """
     needle = str(query).casefold()
     all_windows = enumerate_windows()
-    exact: list[dict] = []
-    candidates: list[dict] = []
+    # Best tier first: hwnd/pid exact, process exact (with or without the
+    # .exe suffix), title exact, process substring, then any substring.
+    tiers: list[list[dict]] = [[], [], [], [], []]
     for window in all_windows:
-        lowered = [
-            str(window["hwnd"]),
-            str(window["pid"]).casefold(),
-            window["process"].casefold(),
-            window["title"].casefold(),
+        process = window["process"].casefold()
+        title = window["title"].casefold()
+        stem = process[:-4] if process.endswith(".exe") else process
+        if needle in (str(window["hwnd"]), str(window["pid"]).casefold()):
+            tiers[0].append(window)
+        elif needle == process or needle == stem:
+            tiers[1].append(window)
+        elif needle == title:
+            tiers[2].append(window)
+        elif needle and needle in process:
+            tiers[3].append(window)
+        elif needle and needle in (
+            title, str(window["hwnd"]), str(window["pid"]).casefold()
+        ):
+            tiers[4].append(window)
+
+    for tier in tiers:
+        matches = [window for window in tier if window["bounds"]]
+        # Drop hook/IME junk that merely mentions the query in its title, and
+        # any window too small to interact with (macOS filters < 40 px too).
+        # Minimized windows are exempt: their bounds are the parked iconic
+        # rect (e.g. 256x35), not their real size, and the harness restores
+        # them on demand.
+        matches = [
+            window
+            for window in matches
+            if window["minimized"]
+            or (
+                window["bounds"][2] - window["bounds"][0] >= 40
+                and window["bounds"][3] - window["bounds"][1] >= 40
+            )
         ]
-        if needle in lowered:
-            exact.append(window)
-        elif any(needle and needle in value for value in lowered):
-            candidates.append(window)
+        if not matches:
+            continue
 
-    matches = [window for window in (exact or candidates) if window["bounds"]]
-    # Drop hook/IME junk that merely mentions the query in its title, and any
-    # window too small to interact with (macOS filters < 40 px as well).
-    matches = [
-        window
-        for window in matches
-        if window["bounds"][2] - window["bounds"][0] >= 40
-        and window["bounds"][3] - window["bounds"][1] >= 40
-    ]
-    if not matches:
-        raise HarnessError(_no_match_error(query, all_windows))
+        def area(window: dict) -> int:
+            left, top, right, bottom = window["bounds"]
+            return (right - left) * (bottom - top)
 
-    def area(window: dict) -> int:
-        left, top, right, bottom = window["bounds"]
-        return (right - left) * (bottom - top)
+        # Never prefer an untitled window: helper hosts (crashpad watchers,
+        # DDE servers) are top-level and visible but are never the
+        # interaction target. And never prefer a minimized window over a
+        # shown one: iconic windows report IsWindowVisible() == True but
+        # their bounds are the parked (-32000) rect.
+        best = min(
+            matches,
+            key=lambda window: (
+                not window["title"],
+                window["minimized"],
+                not (window["visible"] and not window["cloaked"]),
+                -area(window),
+            ),
+        )
+        return best["hwnd"], best
 
-    # Never prefer a minimized window over a shown one: iconic windows report
-    # IsWindowVisible() == True but their bounds are the parked (-32000) rect.
-    best = min(
-        matches,
-        key=lambda window: (
-            window["minimized"],
-            not (window["visible"] and not window["cloaked"]),
-            -area(window),
-        ),
-    )
-    return best["hwnd"], best
+    raise HarnessError(_no_match_error(query, all_windows))
 
 
 # System-internal windows that show up in every enumeration and mean nothing
