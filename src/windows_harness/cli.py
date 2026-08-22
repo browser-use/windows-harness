@@ -112,7 +112,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("doctor", help="check the interactive desktop and runtime")
-    subparsers.add_parser("apps", help="list processes that own windows")
+    apps_cmd = subparsers.add_parser(
+        "apps", help="list app processes that own windows (compact JSON)"
+    )
+    apps_cmd.add_argument(
+        "--all", action="store_true",
+        help="include system plumbing (IME helpers, tool windows, untitled frames)",
+    )
     subparsers.add_parser("repl", help="start a persistent interactive Python session")
     execute = subparsers.add_parser(
         "exec", help="execute one Python snippet with win ready (argv-only)"
@@ -147,7 +153,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(Windows().doctor(), indent=2))
             return 0
         if args.command == "apps":
-            print(json.dumps(Windows().list_apps(), indent=2))
+            # Compact JSON: one line per process keeps the inventory inside
+            # agent output limits; indent=2 tripled the token cost.
+            print(json.dumps(Windows().list_apps(include_system=args.all), ensure_ascii=False))
             return 0
         if args.command == "install-skill":
             return _install_skill(getattr(args, "target", None))

@@ -51,6 +51,20 @@ class FocusChangedError(HarnessError):
     """A background-targeted action disturbed the user's foreground."""
 
 
+def _click_delivery_hint(result: dict[str, Any], hwnd: int) -> str | None:
+    """Posted clicks against WebView2/Tauri hosts are often silently ignored;
+    point the agent at the designed escape hatch instead of more retries."""
+    from .delivery import has_chromium_descendant
+
+    if result.get("mode") == "message" and has_chromium_descendant(hwnd):
+        return (
+            "webview host (Tauri/WebView2): posted clicks may be ignored here. "
+            "If verify_change(app) reports no change, record it once with "
+            "note_drop('mouse_click', ...) and redo with delivery='foreground'."
+        )
+    return None
+
+
 # UIA element handles are retired once the table outgrows this; evicted
 # indices fail with an honest error instead of pinning COM references forever.
 _ELEMENT_CACHE_LIMIT = 4096
@@ -118,8 +132,8 @@ class Windows:
             ),
         }
 
-    def list_apps(self) -> list[dict[str, Any]]:
-        return list_processes()
+    def list_apps(self, *, include_system: bool = False) -> list[dict[str, Any]]:
+        return list_processes(include_system=include_system)
 
     def windows(self, app: str) -> list[dict[str, Any]]:
         _hwnd, info = self._resolve_hwnd(app)
@@ -432,6 +446,9 @@ class Windows:
         self._overlay.click()
         result["focus"] = self._guard_focus(focus_before, "click")
         result["app"] = info
+        hint = _click_delivery_hint(result, hwnd)
+        if hint:
+            result["hint"] = hint
         return result
 
     def drag(

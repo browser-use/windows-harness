@@ -24,7 +24,7 @@ reserve `windows-harness repl` for manual exploration and always exit it.
 One-off questions — use a subcommand (identical in PowerShell, cmd, and bash):
 
 ```bash
-windows-harness apps                 # every process owning windows, as JSON
+windows-harness apps                 # app inventory, compact JSON (--all adds system windows)
 windows-harness see "CC Switch"      # one screenshot -> JSON with its "path"
 windows-harness state "Notepad"      # UIA tree as JSON (--screenshot adds image)
 ```
@@ -128,6 +128,11 @@ with repeated keys, clicks, deletion loops, or bulk input.
   `win.note_drop("text_input", app="...")`. Future background calls against
   that window class refuse honestly instead of repeating a dead transport.
   `doctor` shows the recorded drops.
+- Tauri/WebView2 hosts: a background click may return `"mode": "message"`,
+  `"verified": false`, and change nothing (a `"hint"` field means exactly
+  this). Do not retry other coordinates — confirm once with
+  `win.verify_change()`, then `win.note_drop("mouse_click", app=...)` and
+  redo the same click with `delivery="foreground"`.
 
 ## Keep the invariants
 
@@ -143,6 +148,9 @@ with repeated keys, clicks, deletion loops, or bulk input.
   caption-button Invoke. The framework-neutral close is the WindowPattern —
   `win.ax.raw(i).GetWindowPattern().Close()` — then answer the app's own
   confirmation through `ax.perform(..., "invoke")`.
+- XAML apps (Win11 Notepad, Settings, UWP frames) refuse background typing —
+  use `win.ax.set_value()` there; WPF refuses background drag and scroll —
+  use `delivery="foreground"`.
 - Screenshot coordinates come from the latest `win.see()` and preserve client
   bounds and DPI scaling. `coordinate_space` accepts `'screenshot'`,
   `'client'`, or `'screen'`.

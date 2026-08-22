@@ -280,3 +280,91 @@ def test_cli_run_executes_script_file(tmp_path, capsys):
 
     missing = tmp_path / "nope.py"
     assert main(["run", str(missing)]) == 1
+
+
+@pytest.mark.skipif(not is_interactive_desktop(), reason="no interactive desktop")
+def test_apps_inventory_filters_system_plumbing():
+    """Default listing stays small; --all is the raw superset."""
+    from windows_harness.capture import list_processes
+
+    clean = list_processes()
+    raw = list_processes(include_system=True)
+    assert len(clean) <= len(raw)
+    junk = {"Default IME", "MSCTFIME UI", "IME", "GDI+ Window"}
+    assert all(
+        title not in junk
+        for entry in clean
+        for title in entry["windows"]
+    )
+    assert all(entry["windows"] for entry in clean)  # no empty entries
+
+
+def test_click_hint_flags_webview_hosts(monkeypatch):
+    """Message-mode clicks on WebView2 hosts carry an actionable hint."""
+    from windows_harness import delivery, windows as windows_module
+
+    monkeypatch.setattr(delivery, "has_chromium_descendant", lambda hwnd: True)
+    hint = windows_module._click_delivery_hint({"mode": "message"}, 1234)
+    assert hint and "foreground" in hint
+    assert windows_module._click_delivery_hint({"mode": "pen"}, 1234) is None
+    monkeypatch.setattr(delivery, "has_chromium_descendant", lambda hwnd: False)
+    assert windows_module._click_delivery_hint({"mode": "message"}, 1234) is None
+
+
+def _isolate_matrix(monkeypatch, *, xaml=False):
+    """Neutralize every delivery detector except the one under test."""
+    from windows_harness import delivery
+
+    monkeypatch.setattr(delivery, "observed_drops", lambda: {})
+    for name in (
+        "is_chromium_target_window", "has_chromium_descendant",
+        "is_wpf_target_window", "is_tk_target_window",
+        "is_winui3_target_window", "is_gtk_target_window",
+        "is_vcl_target_window",
+    ):
+        monkeypatch.setattr(delivery, name, lambda h: False)
+    monkeypatch.setattr(delivery, "is_xaml_host_window", lambda h: xaml)
+    monkeypatch.setattr(delivery, "_target_is_foreground", lambda h: True)
+    return delivery
+
+
+def test_wpf_refuses_pointer_and_scroll(monkeypatch):
+    """WPF drops posted pointer input AND the posted wheel (cua learning)."""
+    delivery = _isolate_matrix(monkeypatch)
+    monkeypatch.setattr(delivery, "is_wpf_target_window", lambda h: True)
+    assert delivery.would_be_silently_dropped(1, delivery.MOUSE_CLICK)
+    assert delivery.would_be_silently_dropped(1, delivery.MOUSE_SCROLL)
+    assert not delivery.would_be_silently_dropped(1, delivery.TEXT_INPUT)
+    assert not delivery.would_be_silently_dropped(1, delivery.KEYSTROKE)
+
+
+def test_xaml_hosts_refuse_background_keyboard(monkeypatch):
+    """XAML islands ignore posted keys/text; clicks stay allowed (CUA-543)."""
+    delivery = _isolate_matrix(monkeypatch, xaml=True)
+    assert delivery.would_be_silently_dropped(1, delivery.TEXT_INPUT)
+    assert delivery.would_be_silently_dropped(1, delivery.KEYSTROKE)
+    assert delivery.would_be_silently_dropped(1, delivery.KEY_COMBO)
+    assert not delivery.would_be_silently_dropped(1, delivery.MOUSE_CLICK)
+
+
+def test_double_click_message_gated_by_class_style(monkeypatch):
+    """WM_*BUTTONDBLCLK is posted only to classes registered CS_DBLCLKS."""
+    from windows_harness import inject
+
+    monkeypatch.setattr(inject, "_get_class_long", lambda h, i: 0x0008)
+    assert inject._class_wants_double_click(1234)
+    monkeypatch.setattr(inject, "_get_class_long", lambda h, i: 0)
+    assert not inject._class_wants_double_click(1234)
+
+
+@pytest.mark.skipif(not is_interactive_desktop(), reason="no interactive desktop")
+def test_focused_descendant_smoke():
+    """Multi-thread focus drill-down runs against a real window."""
+    from windows_harness.capture import enumerate_windows
+    from windows_harness.inject import focused_descendant
+
+    visible = [w for w in enumerate_windows() if w["visible"] and w["bounds"]]
+    if not visible:
+        pytest.skip("no visible windows")
+    result = focused_descendant(visible[0]["hwnd"])
+    assert isinstance(result, int) and result >= 0

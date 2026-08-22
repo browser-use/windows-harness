@@ -283,13 +283,34 @@ def resolve_hwnd(query: str) -> tuple[int, dict]:
     return best["hwnd"], best
 
 
-def list_processes() -> list[dict]:
-    """One entry per process that owns a top-level window."""
+# System-internal windows that show up in every enumeration and mean nothing
+# to an agent. Filtered from the default inventory; `include_system` bypasses.
+_SYSTEM_WINDOW_CLASSES = {
+    "Default IME", "MSCTFIME UI", "IME", "GDI+ Window",
+    "BroadcastListenerWindow", "MSITProSignOff", "MSUIHTML",
+    "Windows.Input.App.Bar", "ApplicationFrame Input Window",
+}
+
+
+def list_processes(*, include_system: bool = False) -> list[dict]:
+    """One entry per process that owns a top-level window.
+
+    By default system plumbing (IME helpers, tool windows, untitled frames)
+    is filtered out — a full enumeration runs to hundreds of lines that
+    overflow agent output limits and bury the real apps. Pass
+    ``include_system=True`` for the raw inventory.
+    """
     processes: dict[int, dict] = {}
     for window in enumerate_windows():
+        if not include_system and (
+            window["tool_window"]
+            or not window["title"].strip()
+            or window["class_name"] in _SYSTEM_WINDOW_CLASSES
+        ):
+            continue
         entry = processes.setdefault(
             window["pid"],
-            {"pid": window["pid"], "name": window["process"], "windows": []},
+            {"pid": window["pid"], "name": window["process"] or "<unknown>", "windows": []},
         )
         entry["windows"].append(window["title"])
     return sorted(processes.values(), key=lambda item: item["name"].casefold())

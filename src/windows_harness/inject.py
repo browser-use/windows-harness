@@ -110,6 +110,7 @@ GWL_EXSTYLE = -20
 WS_EX_NOACTIVATE = 0x08000000
 
 # Synthetic pointer (Win10 1709+)
+PT_TOUCH = 2
 PT_PEN = 3
 POINTER_FEEDBACK_DEFAULT = 1
 POINTER_FLAG_INRANGE = 0x00000002
@@ -792,8 +793,20 @@ class _POINTER_PEN_INFO(ctypes.Structure):
     )
 
 
+class _POINTER_TOUCH_INFO(ctypes.Structure):
+    _fields_ = (
+        ("pointerInfo", _POINTER_INFO),
+        ("touchFlags", wt.UINT),
+        ("touchMask", wt.UINT),
+        ("rcContact", wt.RECT),
+        ("rcContactRaw", wt.RECT),
+        ("orientation", wt.UINT),
+        ("pressure", wt.UINT),
+    )
+
+
 class _POINTER_TYPE_INFO_UNION(ctypes.Union):
-    _fields_ = (("penInfo", _POINTER_PEN_INFO),)
+    _fields_ = (("penInfo", _POINTER_PEN_INFO), ("touchInfo", _POINTER_TOUCH_INFO))
 
 
 class _POINTER_TYPE_INFO(ctypes.Structure):
@@ -817,53 +830,51 @@ class _PenInjectionFailed(Exception):
     """Internal: an InjectSyntheticPointerInput call reported failure."""
 
 
-_pen_device: int | None = None
+_pointer_devices: dict[int, int] = {}
 
 
-def _acquire_pen_device() -> int:
-    """One shared synthetic pen serves every action; creating a virtual HID
+def _acquire_pointer_device(pointer_type: int) -> int:
+    """One shared synthetic device per pointer type; creating a virtual HID
     stack is PnP work, and rapid create/destroy cycles fail outright in quick
     succession (cua #1984)."""
-    global _pen_device
-    if _pen_device:
-        return _pen_device
-    device = CreateSyntheticPointerDevice(PT_PEN, 1, _POINTER_FEEDBACK_DEFAULT)
+    device = _pointer_devices.get(pointer_type)
+    if device:
+        return device
+    device = CreateSyntheticPointerDevice(pointer_type, 1, _POINTER_FEEDBACK_DEFAULT)
     if not device:
         raise HarnessError(
             f"CreateSyntheticPointerDevice failed: {ctypes.FormatError(ctypes.get_last_error())}"
         )
-    _pen_device = device
+    _pointer_devices[pointer_type] = device
     return device
 
 
-def _discard_pen_device(device: int) -> None:
+def _discard_pointer_device(pointer_type: int, device: int) -> None:
     """Destroy a possibly-wedged device so the next acquire builds a fresh one."""
-    global _pen_device
-    if _pen_device == device:
-        _pen_device = None
+    if _pointer_devices.get(pointer_type) == device:
+        del _pointer_devices[pointer_type]
     DestroySyntheticPointerDevice(device)
 
 
-def _destroy_cached_pen_device() -> None:
-    global _pen_device
-    if _pen_device:
-        DestroySyntheticPointerDevice(_pen_device)
-        _pen_device = None
+def _destroy_cached_pointer_devices() -> None:
+    while _pointer_devices:
+        _, device = _pointer_devices.popitem()
+        DestroySyntheticPointerDevice(device)
 
 
-atexit.register(_destroy_cached_pen_device)
+atexit.register(_destroy_cached_pointer_devices)
 
 
-def _with_pen_device(act: Callable[[int], None]) -> None:
+def _with_pointer_device(pointer_type: int, act: Callable[[int], None]) -> None:
     """Run act(device); a wedged shared device is destroyed and the action
     retried once on a fresh one before giving up."""
     for attempt in (1, 2):
-        device = _acquire_pen_device()
+        device = _acquire_pointer_device(pointer_type)
         try:
             act(device)
             return
         except _PenInjectionFailed as exc:
-            _discard_pen_device(device)
+            _discard_pointer_device(pointer_type, device)
             if attempt == 2:
                 raise HarnessError(
                     f"InjectSyntheticPointerInput failed: {exc}"
@@ -890,7 +901,7 @@ def pen_taps(sx: int, sy: int, *, barrel: bool, count: int = 1) -> None:
             if index + 1 < count:
                 time.sleep(0.07)
 
-    _with_pen_device(act)
+    _with_pointer_device(PT_PEN, act)
 
 
 def pen_drag(sx0: int, sy0: int, sx1: int, sy1: int, *, steps: int = 12, duration: float = 0.25) -> None:
@@ -918,7 +929,69 @@ def pen_drag(sx0: int, sy0: int, sx1: int, sy1: int, *, steps: int = 12, duratio
         ):
             raise _PenInjectionFailed(ctypes.FormatError(ctypes.get_last_error()))
 
-    _with_pen_device(act)
+    _with_pointer_device(PT_PEN, act)
+
+
+def _touch_info(sx: int, sy: int, flags: int) -> _POINTER_TYPE_INFO:
+    info = _POINTER_TYPE_INFO()
+    info.pointerType = PT_TOUCH
+    touch = info.touchInfo
+    touch.pointerInfo.pointerType = PT_TOUCH
+    touch.pointerInfo.pointerFlags = flags
+    touch.pointerInfo.ptPixelLocation = wt.POINT(sx, sy)
+    touch.rcContact = wt.RECT(sx - 2, sy - 2, sx + 2, sy + 2)
+    touch.rcContactRaw = wt.RECT(sx - 2, sy - 2, sx + 2, sy + 2)
+    touch.pressure = 512
+    return info
+
+
+def touch_drag(sx0: int, sy0: int, sx1: int, sy1: int, *, steps: int = 12) -> None:
+    """Left-drag through a synthetic TOUCH contact from a standing digitizer.
+
+    A pen is an absolute *cursor* device: on non-pointer-aware windows the OS
+    promotes it to mouse input and drags the user's real cursor along. A touch
+    contact from a standing digitizer is consumed as touch and does not move
+    the cursor (cua touch_drag); for the promotion cases where it still does,
+    the cursor is snapped back twice so the net displacement is zero. A fast
+    stroke (few frames, tiny dwell) keeps any excursion a brief flick.
+    """
+    try:
+        prev_cursor = get_cursor()
+    except ForegroundError:
+        prev_cursor = None
+    steps = min(max(1, steps), 3)
+
+    def act(device: int) -> None:
+        contact = POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT
+        down = _touch_info(sx0, sy0, contact)
+        if not InjectSyntheticPointerInput(device, ctypes.byref(down), 1):
+            raise _PenInjectionFailed(ctypes.FormatError(ctypes.get_last_error()))
+        move_flags = POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT
+        for index in range(1, steps + 1):
+            time.sleep(0.002)
+            ratio = index / steps
+            x = int(sx0 + (sx1 - sx0) * ratio)
+            y = int(sy0 + (sy1 - sy0) * ratio)
+            move = _touch_info(x, y, move_flags)
+            if not InjectSyntheticPointerInput(device, ctypes.byref(move), 1):
+                raise _PenInjectionFailed(ctypes.FormatError(ctypes.get_last_error()))
+        time.sleep(0.002)
+        up = _touch_info(sx1, sy1, POINTER_FLAG_UP)
+        if not InjectSyntheticPointerInput(device, ctypes.byref(up), 1):
+            raise _PenInjectionFailed(ctypes.FormatError(ctypes.get_last_error()))
+
+    try:
+        _with_pointer_device(PT_TOUCH, act)
+    finally:
+        if prev_cursor is not None:
+            # The OS processes promoted mouse moves slightly after injection;
+            # settle, then restore twice to win the race (cua mouse.rs).
+            try:
+                set_cursor(*prev_cursor)
+                time.sleep(0.012)
+                set_cursor(*prev_cursor)
+            except ForegroundError:
+                pass
 
 
 def target_visible_at_point(target: int, sx: int, sy: int) -> bool:
@@ -988,20 +1061,59 @@ def inject_click_screen(target: int, sx: int, sy: int, *, button: str, clicks: i
 # --- transport 2: window messages --------------------------------------------
 
 
+if hasattr(user32, "GetClassLongPtrW"):
+    _get_class_long = user32.GetClassLongPtrW
+else:  # 32-bit Python
+    _get_class_long = user32.GetClassLongW
+
+GCL_STYLE = -26
+CS_DBLCLKS = 0x0008
+
+
+def _class_wants_double_click(hwnd: int) -> bool:
+    """Only classes registered with CS_DBLCLKS honour WM_*BUTTONDBLCLK;
+    posting it elsewhere silently swallows the second click (cua mouse.rs)."""
+    return bool(_get_class_long(wt.HWND(hwnd), GCL_STYLE) & CS_DBLCLKS)
+
+
+def _deepest_child_at(root: int, sx: int, sy: int) -> int:
+    """Walk to the deepest visible child under the screen point; a single
+    ChildWindowFromPointEx hop stops at the first nesting level."""
+    current = root
+    flags = CWP_SKIPINVISIBLE | CWP_SKIPTRANSPARENT | CWP_SKIPDISABLED
+    while True:
+        cx, cy = screen_to_client(current, sx, sy)
+        child = user32.ChildWindowFromPointEx(wt.HWND(current), wt.POINT(cx, cy), flags)
+        if not child or child == current:
+            return current
+        current = child
+
+
 def post_click_screen(root: int, sx: int, sy: int, *, button: str, clicks: int) -> dict:
     mk_flag, down_msg, dbl_msg, up_msg = _BUTTON_MESSAGES[button]
-    client_x, client_y = screen_to_client(root, sx, sy)
-    target = child_window_at(root, client_x, client_y)
-    if target != root:
-        client_x, client_y = screen_to_client(target, sx, sy)
-
-    post_message(target, WM_MOUSEMOVE, mk_flag, pack_lparam(client_x, client_y))
-    for click_count in range(1, max(1, clicks) + 1):
-        down = dbl_msg if click_count > 1 else down_msg
-        post_message(target, down, mk_flag, pack_lparam(client_x, client_y))
-        time.sleep(0.03)
-        post_message(target, up_msg, 0, pack_lparam(client_x, client_y))
-        time.sleep(0.03)
+    target = _deepest_child_at(root, sx, sy)
+    client_x, client_y = screen_to_client(target, sx, sy)
+    wants_double = _class_wants_double_click(target)
+    previous_foreground = current_foreground()
+    target_root = _root_ancestor(target)
+    # Posted messages are normally non-activating, but WebView hosts can call
+    # SetForegroundWindow from their event handlers — hold the burst guarded.
+    with _NoActivateGuard(target):
+        for click_count in range(1, max(1, clicks) + 1):
+            press = dbl_msg if (wants_double and click_count % 2 == 0) else down_msg
+            # Hover first with no buttons held so hover state is correct.
+            post_message(target, WM_MOUSEMOVE, 0, pack_lparam(client_x, client_y))
+            post_message(target, press, mk_flag, pack_lparam(client_x, client_y))
+            time.sleep(0.03)
+            post_message(target, up_msg, 0, pack_lparam(client_x, client_y))
+            if click_count < clicks:
+                time.sleep(0.08)
+        time.sleep(0.05)
+    if (previous_foreground and previous_foreground != target_root
+            and current_foreground() == target_root):
+        force_foreground(previous_foreground)
+        time.sleep(0.012)
+        force_foreground(previous_foreground)
     return {"mode": "message", "verified": False, "target_hwnd": target}
 
 
@@ -1019,14 +1131,56 @@ class _GUITHREADINFO(ctypes.Structure):
     ]
 
 
+_ENUM_CHILD_PROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+
+
+def focused_descendant(parent: int) -> int:
+    """Focused child across ALL UI threads under `parent`, or 0.
+
+    Embedded editors (Scintilla in Notepad++, RichEdit in WordPad, WebView2
+    renderers) keep their focused child on a different UI thread than the
+    top-level frame; a single-thread GetGUIThreadInfo misses it and WM_CHAR
+    posted to the frame silently no-ops (cua keyboard.rs). The deepest
+    focused descendant wins when several threads hold focus."""
+    parent_thread = user32.GetWindowThreadProcessId(wt.HWND(parent), None)
+    if not parent_thread:
+        return 0
+    threads = [parent_thread]
+
+    @_ENUM_CHILD_PROC
+    def collect(child: int, _lparam: int) -> bool:
+        thread = user32.GetWindowThreadProcessId(wt.HWND(child), None)
+        if thread and thread not in threads:
+            threads.append(thread)
+        return True
+
+    user32.EnumChildWindows(wt.HWND(parent), collect, 0)
+
+    best_hwnd, best_depth = 0, -1
+    for thread in threads:
+        info = _GUITHREADINFO()
+        info.cbSize = ctypes.sizeof(info)
+        if not user32.GetGUIThreadInfo(thread, ctypes.byref(info)):
+            continue
+        focused = info.hwndFocus
+        if (not focused or focused == parent
+                or not user32.IsChild(wt.HWND(parent), wt.HWND(focused))):
+            continue
+        depth, current = 0, focused
+        while current != parent and depth < 64:
+            nxt = user32.GetParent(wt.HWND(current))
+            if not nxt:
+                break
+            depth += 1
+            current = nxt
+        if current == parent and depth > best_depth:
+            best_depth, best_hwnd = depth, focused
+    return best_hwnd
+
+
 def background_focus_window(hwnd: int) -> int:
     """The child window that would receive keys if the app were active."""
-    thread_id = user32.GetWindowThreadProcessId(hwnd, None)
-    info = _GUITHREADINFO()
-    info.cbSize = ctypes.sizeof(info)
-    if thread_id and user32.GetGUIThreadInfo(thread_id, ctypes.byref(info)):
-        return info.hwndFocus or hwnd
-    return hwnd
+    return focused_descendant(hwnd) or hwnd
 
 
 def _message_vk_pair(hwnd: int, vk: int, *, down_only: bool = False, up_only: bool = False) -> None:
@@ -1339,8 +1493,17 @@ def drag(target: int, start: tuple[float, float], end: tuple[float, float], *, b
     blocked = delivery.post_message_blocked_by_uipi(target)
     if blocked:
         raise delivery.refuse_background(target, delivery.MOUSE_CLICK, blocked)
+    if delivery.is_wpf_target_window(target):
+        # WPF's Wisp stylus stack only processes injected input while the
+        # window is foreground, which background must not force (cua) — a
+        # pen/touch drag here would do nothing but wiggle the user's cursor.
+        raise delivery.refuse_background(
+            target, delivery.MOUSE_CLICK,
+            "WPF processes injected pointer input only while foreground; a "
+            "background drag is undeliverable",
+        )
     if delivery.would_be_silently_dropped(target, delivery.MOUSE_CLICK):
-        # Pen drag routes by coordinate; occlusion still refuses.
+        # Coordinate-routed touch/pen routes by coordinate; occlusion still refuses.
         if not target_visible_at_point(target, int(start[0]), int(start[1])):
             raise delivery.refuse_background(
                 target, delivery.MOUSE_CLICK,
@@ -1350,10 +1513,16 @@ def drag(target: int, start: tuple[float, float], end: tuple[float, float], *, b
         sx, sy = int(start[0]), int(start[1])
         ex, ey = int(end[0]), int(end[1])
         with _NoActivateGuard(target):
-            pen_drag(sx, sy, ex, ey, steps=steps, duration=duration)
+            if button == "left":
+                # Touch from a standing digitizer never drags the user's cursor.
+                touch_drag(sx, sy, ex, ey, steps=steps)
+                mode = "touch"
+            else:
+                pen_drag(sx, sy, ex, ey, steps=steps, duration=duration)
+                mode = "pen"
         if previous_foreground and previous_foreground != target:
             force_foreground(previous_foreground)
             time.sleep(0.012)
             force_foreground(previous_foreground)
-        return {"mode": "pen", "verified": False, "cloaked": False}
+        return {"mode": mode, "verified": False, "cloaked": False}
     return post_drag(target, start, end, button=button, steps=steps, duration=duration)

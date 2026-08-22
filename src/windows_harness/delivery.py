@@ -20,7 +20,7 @@ import json
 import os
 from pathlib import Path
 
-from .capture import HarnessError, user32
+from .capture import HarnessError, process_image_name, user32
 
 advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -121,6 +121,34 @@ def is_vcl_target_window(hwnd: int) -> bool:
     return read_class_name(hwnd).startswith("SAL")
 
 
+_XAML_HOST_CLASSES = {
+    "ApplicationFrameWindow",
+    "WinUIDesktopWin32WindowClass",
+    "Windows.UI.Core.CoreWindow",
+    "Microsoft.UI.Content.DesktopChildSiteBridge",
+}
+_XAML_HOST_EXES = {
+    "notepad.exe",           # Win 11 modern Notepad (UWP-packaged)
+    "calculatorapp.exe",     # UWP Calculator
+    "calc.exe",              # some Win 11 builds expose the stub directly
+    "applicationframehost.exe",
+    "photos.exe",
+    "systemsettings.exe",
+}
+
+
+def is_xaml_host_window(hwnd: int) -> bool:
+    """XAML island hosts ignore posted keys and text entirely; UIA patterns
+    are the only honest background route for typing there (cua CUA-543)."""
+    if read_class_name(hwnd) in _XAML_HOST_CLASSES:
+        return True
+    pid = wt.DWORD()
+    if not user32.GetWindowThreadProcessId(wt.HWND(hwnd), ctypes.byref(pid)):
+        return False
+    name = process_image_name(pid.value) or ""
+    return os.path.basename(name).casefold() in _XAML_HOST_EXES
+
+
 # --- observed drops: the matrix learns from first-hand evidence -------------
 #
 # The static matrix below encodes cua's cross-machine observations. Individual
@@ -195,11 +223,18 @@ def would_be_silently_dropped(hwnd: int, kind: str) -> bool:
         return kind in (MOUSE_MOVE, MOUSE_SCROLL, KEY_COMBO)
     if is_wpf_target_window(hwnd):
         # Pointer events always dropped; keys dropped while another window
-        # owns the foreground. Scrollbar WM_*SCROLL posts stay allowed.
-        pointer = kind in (MOUSE_CLICK, MOUSE_MOVE)
+        # owns the foreground. WPF also ignores posted wheel messages (cua
+        # routes scrolls through WM_*SCROLL/UIA instead — neither maps onto a
+        # wheel-delta API, so refuse honestly). Background drags are refused
+        # separately at dispatch (Wisp only processes input while foreground).
+        pointer = kind in (MOUSE_CLICK, MOUSE_MOVE, MOUSE_SCROLL)
         keys = kind in (KEYSTROKE, KEY_COMBO) and not _target_is_foreground(hwnd)
         return pointer or keys
     if is_tk_target_window(hwnd):
+        return kind in (KEYSTROKE, KEY_COMBO, TEXT_INPUT)
+    if is_xaml_host_window(hwnd):
+        # XAML islands ignore posted keys/text entirely (CUA-543); typing there
+        # must route through UIA patterns (win.ax.set_value).
         return kind in (KEYSTROKE, KEY_COMBO, TEXT_INPUT)
     if is_winui3_target_window(hwnd):
         # Deliberately NOT flagged: pen injection click-activates WinUI3
