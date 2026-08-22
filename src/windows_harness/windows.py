@@ -12,9 +12,11 @@ a brief cloaked takeover, restored afterwards.
 
 from __future__ import annotations
 
+import atexit
 import subprocess
 import tempfile
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +53,14 @@ class FocusChangedError(HarnessError):
     """A background-targeted action disturbed the user's foreground."""
 
 
+# UIA element handles are retired once the table outgrows this; evicted
+# indices fail with an honest error instead of pinning COM references forever.
+_ELEMENT_CACHE_LIMIT = 4096
+
+# Auto-generated screenshot files kept on disk before the oldest is deleted.
+_TEMP_SHOT_KEEP = 64
+
+
 class Windows:
     """Low-level Windows observation and control for one persistent process."""
 
@@ -61,11 +71,15 @@ class Windows:
                 "workstation). Run windows-harness inside a logged-in session."
             )
         ensure_dpi_awareness()
+        inject.recover_abandoned_cloaks()
         self._elements: dict[int, Any] = {}
+        self._element_seq = 0
+        self._temp_shots: deque[Path] = deque(maxlen=_TEMP_SHOT_KEEP)
         self._last_window: dict[str, Any] | None = None
         self._last_screenshot: dict[str, Any] | None = None
         self._pointer_position: tuple[float, float] | None = None
         self._overlay = LivePointerOverlay()
+        atexit.register(self._cleanup_temp_shots)
         self.ax = Accessibility(self)
 
     # --- runtime report ----------------------------------------------------
@@ -161,7 +175,14 @@ class Windows:
             ) from exc
 
     def _remember_element(self, element: Any) -> int:
-        index = max(self._elements, default=-1) + 1
+        # Indices come from a monotonic counter: a handle retired by eviction
+        # or a newer snapshot can never alias a fresh element, so stale handles
+        # fail loudly instead of silently acting on the wrong control.
+        if len(self._elements) >= _ELEMENT_CACHE_LIMIT:
+            for key in list(self._elements)[: _ELEMENT_CACHE_LIMIT // 4]:
+                del self._elements[key]
+        index = self._element_seq
+        self._element_seq += 1
         self._elements[index] = element
         return index
 
@@ -187,12 +208,9 @@ class Windows:
 
     # --- screenshots ---------------------------------------------------------
 
-    def capture_screenshot(
-        self,
-        app: str | None = None,
-        *,
-        path: str | Path | None = None,
-    ) -> dict[str, Any]:
+    def _capture_shot(self, app: str | None) -> tuple[int, dict[str, Any], dict[str, Any]]:
+        """Capture one window with the image still in memory — no disk round
+        trip; the caller encodes once, at its final size."""
         hwnd, info = self._resolve_hwnd(app)
         shot = capture_window(hwnd)
         if shot["minimized"]:
@@ -200,17 +218,49 @@ class Windows:
             # restore invisibly under the cloak, capture, then re-minimize.
             with inject.cloaked_focus(hwnd, cloak=True) as _cloaked:
                 shot = capture_window(hwnd)
-        image = shot.pop("image")
+        return hwnd, info, shot
 
+    def _save_shot(self, image: Any, path: str | Path | None) -> Path:
         if path is None:
             with tempfile.NamedTemporaryFile(
                 prefix="windows-harness-", suffix=".png", delete=False
             ) as handle:
                 output = Path(handle.name)
+            self._track_temp_shot(output)
         else:
             output = Path(path).expanduser().resolve()
             output.parent.mkdir(parents=True, exist_ok=True)
         image.save(output, format="PNG", compress_level=1)
+        return output
+
+    def _track_temp_shot(self, output: Path) -> None:
+        """Auto-generated screenshots are transient vision inputs: keep only
+        the newest handful so a long session cannot fill %TEMP%."""
+        while len(self._temp_shots) >= self._temp_shots.maxlen:
+            victim = self._temp_shots.popleft()
+            try:
+                victim.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self._temp_shots.append(output)
+
+    def _cleanup_temp_shots(self) -> None:
+        while self._temp_shots:
+            victim = self._temp_shots.popleft()
+            try:
+                victim.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def capture_screenshot(
+        self,
+        app: str | None = None,
+        *,
+        path: str | Path | None = None,
+    ) -> dict[str, Any]:
+        hwnd, info, shot = self._capture_shot(app)
+        image = shot.pop("image")
+        output = self._save_shot(image, path)
 
         bounds = shot["client_bounds"]
         screenshot = {
@@ -241,13 +291,12 @@ class Windows:
         """Capture a bounded window image and draw the harness pointer onto it."""
         if max_width <= 0 or max_height <= 0:
             raise HarnessError("max_width and max_height must be positive")
-        screenshot = self.capture_screenshot(app, path=path)
-        output = Path(screenshot["path"])
+        hwnd, info, shot = self._capture_shot(app)
+        image = shot.pop("image")  # the capturer always hands back RGB pixels
+        raw_size = (image.width, image.height)
 
         from PIL import Image, ImageDraw
 
-        with Image.open(output) as source:
-            image = source.convert("RGB")
         ratio = min(1.0, max_width / image.width, max_height / image.height)
         if ratio < 1.0:
             size = (
@@ -256,7 +305,7 @@ class Windows:
             )
             image = image.resize(size, Image.Resampling.LANCZOS)
 
-        bounds = screenshot["client_bounds"]
+        bounds = shot["client_bounds"]
         scale_x = image.width / float(bounds["width"])
         scale_y = image.height / float(bounds["height"])
         pointer = self._pointer_position
@@ -289,23 +338,28 @@ class Windows:
                 outline_width = max(2, round(2.5 * (scale_x + scale_y) / 2))
                 draw.polygon(points, fill=(10, 10, 10), outline=(255, 255, 255), width=outline_width)
 
-        image.save(output, format="PNG", compress_level=1)
+        output = self._save_shot(image, path)
         foreground = current_foreground()
-        screenshot.update(
-            {
-                "raw_width": screenshot["width"],
-                "raw_height": screenshot["height"],
-                "width": image.width,
-                "height": image.height,
-                "scale_x": scale_x,
-                "scale_y": scale_y,
-                "virtual_pointer": pointer_info,
-                "focus": {
-                    "foreground_hwnd": foreground,
-                    "target_is_foreground": foreground == screenshot["hwnd"],
-                },
-            }
-        )
+        screenshot = {
+            "path": str(output),
+            "app": info,
+            "hwnd": hwnd,
+            "raw_width": raw_size[0],
+            "raw_height": raw_size[1],
+            "width": image.width,
+            "height": image.height,
+            "client_bounds": bounds,
+            "scale_x": scale_x,
+            "scale_y": scale_y,
+            "backend": shot["backend"],
+            "minimized": shot["minimized"],
+            "virtual_pointer": pointer_info,
+            "focus": {
+                "foreground_hwnd": foreground,
+                "target_is_foreground": foreground == hwnd,
+            },
+        }
+        self._last_window = info
         self._last_screenshot = screenshot
         return screenshot
 
@@ -496,6 +550,10 @@ class Windows:
         foreground, no agent vision round trip. Animated windows (video,
         blinking carets) report ``changed`` on their own; treat those targets
         as unverifiable here and confirm semantically through ``win.ax``.
+
+        Every poll is a full PrintWindow capture (each bounded by its own
+        ~4 s hung-window timeout), so worst-case wall time can exceed
+        ``timeout`` by up to two capture timeouts.
         """
         hwnd, info = self._resolve_hwnd(app)
         before = self._fingerprint(hwnd)

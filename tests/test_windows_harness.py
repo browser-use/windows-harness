@@ -203,3 +203,61 @@ def test_ax_get_value_falls_back_to_patterns():
     assert Accessibility(Host()).get(0, "Value") == "read through the pattern"
     with pytest.raises(HarnessError):
         Accessibility(Host()).get(1, "Value")  # unknown index stays honest
+
+
+def test_vk_for_key_rejects_non_ascii():
+    """Non-ASCII alnum characters must fail loudly, not emit bogus VK codes."""
+    from windows_harness.inject import vk_for_key
+
+    with pytest.raises(HarnessError):
+        vk_for_key("中")
+    assert vk_for_key("n") == 0x4E  # ASCII behaviour is untouched
+
+
+@pytest.mark.skipif(not is_interactive_desktop(), reason="no interactive desktop")
+def test_pen_injection_on_dead_window_reports_missing_window():
+    """Regression: ctypes returns int, so `IsWindow(...) is False` never fired."""
+    from windows_harness.inject import inject_click_screen
+
+    with pytest.raises(HarnessError, match="no longer exists"):
+        inject_click_screen(0xDEADBEEF, 10, 10, button="left", clicks=1)
+
+
+@pytest.mark.skipif(not is_interactive_desktop(), reason="no interactive desktop")
+def test_element_indices_monotonic_and_eviction_honest(monkeypatch):
+    """Stale handles never alias fresh elements; evicted ones fail loudly."""
+    from windows_harness import windows as windows_module
+    from windows_harness.windows import Windows
+
+    win = Windows()
+    first = win._remember_element("first")
+    second = win._remember_element("second")
+    assert second == first + 1
+
+    monkeypatch.setattr(windows_module, "_ELEMENT_CACHE_LIMIT", 8)
+    for _ in range(20):
+        win._remember_element(object())
+    with pytest.raises(HarnessError, match="fresh snapshot"):
+        win._element(first)
+
+
+@pytest.mark.skipif(not is_interactive_desktop(), reason="no interactive desktop")
+def test_temp_screenshots_trimmed_and_cleaned(monkeypatch):
+    """Auto-generated shots are bounded on disk and removed at exit."""
+    from PIL import Image
+
+    from windows_harness import windows as windows_module
+    from windows_harness.windows import Windows
+
+    monkeypatch.setattr(windows_module, "_TEMP_SHOT_KEEP", 3)
+    win = Windows()
+    image = Image.new("RGB", (4, 4))
+    paths = [win._save_shot(image, None) for _ in range(6)]
+
+    kept = list(win._temp_shots)
+    assert len(kept) == 3
+    assert all(path.exists() for path in kept)
+    assert not any(path.exists() for path in paths[:3])  # oldest evicted
+
+    win._cleanup_temp_shots()
+    assert not any(path.exists() for path in kept)

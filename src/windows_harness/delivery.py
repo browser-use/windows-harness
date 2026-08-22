@@ -278,11 +278,20 @@ def _process_integrity_rid(hprocess: wt.HANDLE) -> int | None:
         kernel32.CloseHandle(token)
 
 
+# This process's integrity level never changes; query the token once.
+_OWN_INTEGRITY_RID: int | None = None
+_OWN_INTEGRITY_CHECKED = False
+
+
 def post_message_blocked_by_uipi(hwnd: int) -> str | None:
+    global _OWN_INTEGRITY_RID, _OWN_INTEGRITY_CHECKED
     pid = wt.DWORD()
     if not user32.GetWindowThreadProcessId(wt.HWND(hwnd), ctypes.byref(pid)):
         return None
-    own_rid = _process_integrity_rid(kernel32.GetCurrentProcess())
+    if not _OWN_INTEGRITY_CHECKED:
+        _OWN_INTEGRITY_CHECKED = True
+        _OWN_INTEGRITY_RID = _process_integrity_rid(kernel32.GetCurrentProcess())
+    own_rid = _OWN_INTEGRITY_RID
     if own_rid is None:
         return None
     handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)

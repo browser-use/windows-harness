@@ -17,7 +17,9 @@ from __future__ import annotations
 import base64
 import io
 import json
+import queue
 import sys
+import threading
 import tkinter as tk
 
 from .capture import ensure_dpi_awareness
@@ -154,17 +156,34 @@ class PointerOverlay:
     def run(self) -> None:
         self._root.withdraw()  # hidden until the first show/move
 
+        # Reading stdin on the UI thread would park the Tk event loop inside a
+        # blocking readline between commands: every after() callback (move
+        # animation steps, the click-release timer) freezes mid-flight. A
+        # reader thread feeds a queue; the loop drains it on a short timer.
+        lines: queue.Queue[str | None] = queue.Queue()
+
+        def read_stdin() -> None:
+            for line in sys.stdin:
+                lines.put(line)
+            lines.put(None)  # EOF: parent closed the pipe or exited
+
+        threading.Thread(target=read_stdin, daemon=True).start()
+
         def pump_stdin() -> None:
-            line = sys.stdin.readline()
-            if not line:
-                self._root.after(10, self._root.destroy)
-                return
-            try:
-                command = json.loads(line)
-                self._handle(command)
-            except (json.JSONDecodeError, KeyError):
-                pass
-            self._root.after(5, pump_stdin)
+            while True:
+                try:
+                    line = lines.get_nowait()
+                except queue.Empty:
+                    self._root.after(5, pump_stdin)
+                    return
+                if line is None:
+                    self._root.after(10, self._root.destroy)
+                    return
+                try:
+                    command = json.loads(line)
+                    self._handle(command)
+                except (json.JSONDecodeError, KeyError):
+                    pass
 
         self._root.after(5, pump_stdin)
         self._root.mainloop()

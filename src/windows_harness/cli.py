@@ -51,6 +51,49 @@ def _skill_text() -> str:
     return checkout.read_text(encoding="utf-8")
 
 
+def _install_skill(target: str | None = None) -> int:
+    """Write SKILL.md and agents metadata into the user's skills directory.
+
+    Prefers the open ``~/.agents/skills`` location and mirrors into
+    ``~/.codex/skills`` so both current and older Codex builds pick it up.
+    """
+    skill_name = "windows-harness"
+    agents_home = Path.home() / ".agents" / "skills" / skill_name
+    codex_home = Path(
+        __import__("os").environ.get("CODEX_HOME", str(Path.home() / ".codex"))
+    ) / "skills" / skill_name
+
+    destinations = [codex_home]
+    if target:
+        destinations = [Path(target).expanduser()]
+    else:
+        if agents_home != codex_home:
+            destinations.insert(0, agents_home)
+
+    files: list[tuple[str, str]] = [
+        ("SKILL.md", _skill_text()),
+        ("agents/openai.yaml", _agent_meta_text()),
+    ]
+    for dest in destinations:
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "agents").mkdir(exist_ok=True)
+        for rel, text in files:
+            (dest / rel).write_text(text, encoding="utf-8")
+        print(f"installed skill -> {dest}")
+    return 0
+
+
+def _agent_meta_text() -> str:
+    bundled = resources.files("windows_harness").joinpath("agents/openai.yaml")
+    if bundled.is_file():
+        return bundled.read_text(encoding="utf-8")
+    checkout = (
+        Path(__file__).resolve().parents[2]
+        / "skills/windows-harness/agents/openai.yaml"
+    )
+    return checkout.read_text(encoding="utf-8")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="windows-harness",
@@ -65,6 +108,8 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("apps", help="list processes that own windows")
     subparsers.add_parser("repl", help="start a persistent interactive Python session")
     subparsers.add_parser("skill", help="print the Windows Harness skill")
+    install = subparsers.add_parser("install-skill", help="install the skill into your agent skills directory")
+    install.add_argument("--target", help="custom skills directory (e.g. ~/.claude/skills/windows-harness)")
     see = subparsers.add_parser("see", help="capture a bounded application window")
     see.add_argument("app")
     see.add_argument("--max-width", type=int, default=1280)
@@ -89,6 +134,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "apps":
             print(json.dumps(Windows().list_apps(), indent=2))
             return 0
+        if args.command == "install-skill":
+            return _install_skill(getattr(args, "target", None))
         if args.command == "skill":
             print(_skill_text(), end="")
             return 0
@@ -134,3 +181,7 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+
+

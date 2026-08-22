@@ -133,6 +133,7 @@ def client_bounds(hwnd: int) -> tuple[int, int, int, int]:
 def enumerate_windows() -> list[dict]:
     """All top-level windows with owner process metadata."""
     results: list[dict] = []
+    image_names: dict[int, str] = {}  # many windows share one pid
 
     @_ENUM_WINDOW_PROC
     def on_window(hwnd: int, _lparam: int) -> bool:
@@ -143,11 +144,15 @@ def enumerate_windows() -> list[dict]:
         class_buffer = ctypes.create_unicode_buffer(256)
         user32.GetClassNameW(hwnd, class_buffer, 256)
         pid = _window_pid(hwnd)
+        name = image_names.get(pid)
+        if name is None:
+            name = os.path.basename(process_image_name(pid) or "")
+            image_names[pid] = name
         results.append(
             {
                 "hwnd": hwnd,
                 "pid": pid,
-                "process": os.path.basename(process_image_name(pid) or ""),
+                "process": name,
                 "title": title_buffer.value,
                 "class_name": class_buffer.value,
                 "bounds": extended_bounds(hwnd),
@@ -263,12 +268,27 @@ def _screen_capture_region(left: int, top: int, width: int, height: int) -> Imag
         user32.ReleaseDC(None, screen_dc)
 
 
+# A capture thread abandoned mid-PrintWindow holds its DC/bitmap pair until
+# the hung window finally answers — potentially forever. GDI objects are capped
+# at 10k per process, so bound how many may be outstanding at once.
+_HUNG_CAPTURE_THREADS: list[threading.Thread] = []
+_MAX_HUNG_CAPTURES = 2
+
+
 def _print_window_capture(hwnd: int, width: int, height: int, *, timeout: float = 4.0) -> Image.Image:
     """PrintWindow on a daemon thread: a hung window must not hang the agent.
 
     On timeout or failure the caller falls back to BitBlt when the window is
     on screen; the abandoned thread only leaks one DC pair until it returns.
+    At most :data:`_MAX_HUNG_CAPTURES` threads may be abandoned at once — past
+    that the capture refuses rather than bleeding GDI handles.
     """
+    _HUNG_CAPTURE_THREADS[:] = [t for t in _HUNG_CAPTURE_THREADS if t.is_alive()]
+    if len(_HUNG_CAPTURE_THREADS) >= _MAX_HUNG_CAPTURES:
+        raise HarnessError(
+            f"{len(_HUNG_CAPTURE_THREADS)} earlier captures of unresponsive "
+            "windows are still blocked; refusing to tie up more GDI handles"
+        )
     outcome: dict[str, object] = {}
 
     def work() -> None:
@@ -281,6 +301,7 @@ def _print_window_capture(hwnd: int, width: int, height: int, *, timeout: float 
     thread.start()
     thread.join(timeout)
     if thread.is_alive():
+        _HUNG_CAPTURE_THREADS.append(thread)
         raise HarnessError(
             f"PrintWindow did not answer within {timeout:g}s (window not responding)"
         )

@@ -25,11 +25,15 @@ instead of silently fronting; only the agent escalates.
 
 from __future__ import annotations
 
+import atexit
 import ctypes
 import ctypes.wintypes as wt
+import json
 import os
 import time
 from contextlib import contextmanager
+from pathlib import Path
+from typing import Callable
 
 from . import delivery
 from .capture import (
@@ -236,7 +240,9 @@ _EXTENDED_KEYS = {
 def vk_for_key(key: str) -> int:
     lowered = key.casefold()
     if len(lowered) == 1:
-        if lowered.isalnum():
+        # Non-ASCII alnum characters (e.g. CJK) would produce a bogus VK code
+        # above 0xFF that SendInput silently ignores; refuse them honestly.
+        if lowered.isascii() and lowered.isalnum():
             return ord(lowered.upper())
         if lowered in _VK_PUNCTUATION:
             return _VK_PUNCTUATION[lowered]
@@ -427,6 +433,72 @@ def set_cloak(hwnd: int, enabled: bool) -> bool:
         if result == 0 and is_cloaked(hwnd):
             return True
     return False
+
+
+# --- cloak crash journal -----------------------------------------------------
+#
+# A harness killed between cloaking a window and uncloaking it would leave the
+# user's window permanently invisible. Cloaked hwnds are journaled to disk and
+# released either on restore or by the next session at startup.
+
+
+def _cloak_journal_path() -> Path:
+    return delivery.config_dir() / "cloaked.json"
+
+
+def _journaled_hwnds() -> list[int]:
+    try:
+        data = json.loads(_cloak_journal_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    entries: list[int] = []
+    for token in data:
+        try:
+            entries.append(int(token, 16))
+        except (TypeError, ValueError):
+            continue
+    return entries
+
+
+def _rewrite_cloak_journal(entries: list[int]) -> None:
+    try:
+        path = _cloak_journal_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if entries:
+            path.write_text(
+                json.dumps([f"{hwnd:x}" for hwnd in entries]), encoding="utf-8"
+            )
+        else:
+            path.unlink(missing_ok=True)
+    except OSError:
+        pass  # the journal is best-effort; never block an action on it
+
+
+def _journal_cloak(hwnd: int) -> None:
+    entries = _journaled_hwnds()
+    if hwnd not in entries:
+        entries.append(hwnd)
+    _rewrite_cloak_journal(entries)
+
+
+def _unjournal_cloak(hwnd: int) -> None:
+    entries = _journaled_hwnds()
+    if hwnd in entries:
+        entries.remove(hwnd)
+        _rewrite_cloak_journal(entries)
+
+
+def recover_abandoned_cloaks() -> int:
+    """Uncloak windows left hidden by a crashed previous session."""
+    recovered = 0
+    for hwnd in _journaled_hwnds():
+        if user32.IsWindow(wt.HWND(hwnd)) and set_cloak(hwnd, False):
+            recovered += 1
+    if _journaled_hwnds():
+        _rewrite_cloak_journal([])
+    return recovered
 
 
 # --- SendInput health probe -------------------------------------------------
@@ -634,6 +706,8 @@ def cloaked_focus(hwnd: int, *, cloak: bool = True):
     previous_cursor = get_cursor()
     was_minimized = bool(user32.IsIconic(hwnd))
     cloaked_ok = set_cloak(hwnd, True) if cloak else False
+    if cloaked_ok:
+        _journal_cloak(hwnd)  # a crash before uncloak must stay recoverable
     try:
         if was_minimized:
             user32.ShowWindow(hwnd, SW_RESTORE)
@@ -655,7 +729,10 @@ def cloaked_focus(hwnd: int, *, cloak: bool = True):
             user32.ShowWindow(hwnd, SW_MINIMIZE)
             time.sleep(0.02)
         if cloaked_ok:
-            set_cloak(hwnd, False)
+            # Only drop the journal entry once the window is veribly visible
+            # again; a failed restore stays recoverable at next startup.
+            if set_cloak(hwnd, False):
+                _unjournal_cloak(hwnd)
         try:
             set_cursor(*previous_cursor)
         except ForegroundError:
@@ -736,53 +813,112 @@ def _pen_info(sx: int, sy: int, flags: int, barrel: bool) -> _POINTER_TYPE_INFO:
     return info
 
 
-def pen_taps(sx: int, sy: int, *, barrel: bool, count: int = 1) -> None:
-    """Down→up pen taps; one synthetic device serves every tap — a fresh
-    device per tap fails in quick succession (cua #1984)."""
+class _PenInjectionFailed(Exception):
+    """Internal: an InjectSyntheticPointerInput call reported failure."""
+
+
+_pen_device: int | None = None
+
+
+def _acquire_pen_device() -> int:
+    """One shared synthetic pen serves every action; creating a virtual HID
+    stack is PnP work, and rapid create/destroy cycles fail outright in quick
+    succession (cua #1984)."""
+    global _pen_device
+    if _pen_device:
+        return _pen_device
     device = CreateSyntheticPointerDevice(PT_PEN, 1, _POINTER_FEEDBACK_DEFAULT)
     if not device:
         raise HarnessError(
             f"CreateSyntheticPointerDevice failed: {ctypes.FormatError(ctypes.get_last_error())}"
         )
-    try:
-        down = _pen_info(sx, sy, POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT, barrel)
-        up = _pen_info(sx, sy, POINTER_FLAG_UP, barrel)
+    _pen_device = device
+    return device
+
+
+def _discard_pen_device(device: int) -> None:
+    """Destroy a possibly-wedged device so the next acquire builds a fresh one."""
+    global _pen_device
+    if _pen_device == device:
+        _pen_device = None
+    DestroySyntheticPointerDevice(device)
+
+
+def _destroy_cached_pen_device() -> None:
+    global _pen_device
+    if _pen_device:
+        DestroySyntheticPointerDevice(_pen_device)
+        _pen_device = None
+
+
+atexit.register(_destroy_cached_pen_device)
+
+
+def _with_pen_device(act: Callable[[int], None]) -> None:
+    """Run act(device); a wedged shared device is destroyed and the action
+    retried once on a fresh one before giving up."""
+    for attempt in (1, 2):
+        device = _acquire_pen_device()
+        try:
+            act(device)
+            return
+        except _PenInjectionFailed as exc:
+            _discard_pen_device(device)
+            if attempt == 2:
+                raise HarnessError(
+                    f"InjectSyntheticPointerInput failed: {exc}"
+                ) from None
+
+
+def pen_taps(sx: int, sy: int, *, barrel: bool, count: int = 1) -> None:
+    """Down→up pen taps through the shared synthetic pen device."""
+    down = _pen_info(
+        sx, sy, POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT, barrel
+    )
+    up = _pen_info(sx, sy, POINTER_FLAG_UP, barrel)
+
+    def act(device: int) -> None:
         for index in range(max(1, count)):
             ok = InjectSyntheticPointerInput(
                 device, ctypes.byref(down), 1
             ) and InjectSyntheticPointerInput(device, ctypes.byref(up), 1)
             if not ok:
-                raise HarnessError(
-                    f"InjectSyntheticPointerInput failed: {ctypes.FormatError(ctypes.get_last_error())}"
+                raise _PenInjectionFailed(
+                    ctypes.FormatError(ctypes.get_last_error())
                 )
             time.sleep(0.025)
             if index + 1 < count:
                 time.sleep(0.07)
-    finally:
-        DestroySyntheticPointerDevice(device)
+
+    _with_pen_device(act)
 
 
 def pen_drag(sx0: int, sy0: int, sx1: int, sy1: int, *, steps: int = 12, duration: float = 0.25) -> None:
-    """Press, glide, release — all through the synthetic pen device."""
-    device = CreateSyntheticPointerDevice(PT_PEN, 1, _POINTER_FEEDBACK_DEFAULT)
-    if not device:
-        raise HarnessError(
-            f"CreateSyntheticPointerDevice failed: {ctypes.FormatError(ctypes.get_last_error())}"
-        )
-    try:
+    """Press, glide, release — all through the shared synthetic pen device."""
+
+    def act(device: int) -> None:
         contact = POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT
-        InjectSyntheticPointerInput(device, ctypes.byref(_pen_info(sx0, sy0, contact, False)), 1)
+        if not InjectSyntheticPointerInput(
+            device, ctypes.byref(_pen_info(sx0, sy0, contact, False)), 1
+        ):
+            raise _PenInjectionFailed(ctypes.FormatError(ctypes.get_last_error()))
         time.sleep(0.025)
         move_flags = POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT
         for index in range(1, max(1, steps) + 1):
             ratio = index / max(1, steps)
             x = int(sx0 + (sx1 - sx0) * ratio)
             y = int(sy0 + (sy1 - sy0) * ratio)
-            InjectSyntheticPointerInput(device, ctypes.byref(_pen_info(x, y, move_flags, False)), 1)
+            if not InjectSyntheticPointerInput(
+                device, ctypes.byref(_pen_info(x, y, move_flags, False)), 1
+            ):
+                raise _PenInjectionFailed(ctypes.FormatError(ctypes.get_last_error()))
             time.sleep(max(0.0, duration) / max(1, steps))
-        InjectSyntheticPointerInput(device, ctypes.byref(_pen_info(sx1, sy1, POINTER_FLAG_UP, False)), 1)
-    finally:
-        DestroySyntheticPointerDevice(device)
+        if not InjectSyntheticPointerInput(
+            device, ctypes.byref(_pen_info(sx1, sy1, POINTER_FLAG_UP, False)), 1
+        ):
+            raise _PenInjectionFailed(ctypes.FormatError(ctypes.get_last_error()))
+
+    _with_pen_device(act)
 
 
 def target_visible_at_point(target: int, sx: int, sy: int) -> bool:
@@ -825,7 +961,7 @@ def inject_click_screen(target: int, sx: int, sy: int, *, button: str, clicks: i
     if button == "middle":
         raise HarnessError("pen injection supports left/right buttons only")
     barrel = button == "right"
-    if user32.IsWindow(wt.HWND(target)) is False:
+    if not user32.IsWindow(wt.HWND(target)):
         raise HarnessError(f"Window {target:#x} no longer exists")
     blocked = delivery.post_message_blocked_by_uipi(target)
     if blocked:

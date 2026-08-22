@@ -303,14 +303,15 @@ class Accessibility:
         return node
 
     def _snapshot_tree(self, root: Any, *, max_depth: int, max_nodes: int) -> list[dict[str, Any]]:
-        self._host._elements = {}
         nodes: list[dict[str, Any]] = []
 
         def visit(element: Any, depth: int) -> None:
             if depth > max_depth or len(nodes) >= max_nodes:
                 return
-            index = len(nodes)
-            self._host._elements[index] = element
+            # Monotonic indices from the shared element table: handles handed
+            # out before this dump can never alias a node of this dump — they
+            # fail honestly instead of acting on the wrong control.
+            index = self._host._remember_element(element)
             node = {"element_index": index, "depth": depth}
             for attribute in _COMPACT_ATTRIBUTES:
                 try:

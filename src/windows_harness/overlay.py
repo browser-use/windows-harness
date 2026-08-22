@@ -78,6 +78,10 @@ class LivePointerOverlay:
             process.stdin.flush()
         except (OSError, ValueError):
             self._process = None
+            try:
+                process.kill()
+            except OSError:
+                pass
 
     def _start(self) -> None:
         self._process = subprocess.Popen(
