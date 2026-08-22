@@ -1418,12 +1418,24 @@ def foreground_key(target: int, key: str, *, cloak: bool, hold: bool = False) ->
     with cloaked_focus(target, cloak=cloak, hold=hold) as cloaked_ok:
         _confirmed_foreground(target, f"key {key!r}")
         if not sendinput_healthy():
-            raise ForegroundError(
-                _SENDINPUT_SWALLOWED_HINT
-                + "key combos have no honest fallback (posted modifiers never "
-                "reach GetKeyState); type text with win.type() or remove the "
-                "filtering software"
-            )
+            if modifier_vks:
+                raise ForegroundError(
+                    _SENDINPUT_SWALLOWED_HINT
+                    + "key combos have no honest fallback (posted modifiers never "
+                    "reach GetKeyState); type text with win.type() or remove the "
+                    "filtering software"
+                )
+            # Bare keys are honest via posted messages once the target really
+            # is foreground and focused (observed: CEF accepts posted
+            # VK_RETURN/VK_BACK in this state while ignoring them in the
+            # background); only combos depend on GetKeyState.
+            result = post_key(target, key)
+            return {
+                "mode": "foreground-message",
+                "verified": False,
+                "cloaked": cloaked_ok,
+                "target_hwnd": result.get("target_hwnd"),
+            }
         events = [_keyboard_input(vk) for vk in modifier_vks]
         events += [_keyboard_input(base_vk), _keyboard_input(base_vk, up=True)]
         events += [_keyboard_input(vk, up=True) for vk in reversed(modifier_vks)]
@@ -1499,7 +1511,7 @@ kernel32.GlobalSize.argtypes = (wt.HANDLE,)
 def set_clipboard_text(text: str) -> None:
     """Place Unicode text on the clipboard; retry while another app holds it."""
     data = text.encode("utf-16-le") + b"\x00\x00"
-    for _attempt in range(20):
+    for _attempt in range(60):
         if user32.OpenClipboard(None):
             break
         time.sleep(0.05)
@@ -1530,7 +1542,7 @@ def set_clipboard_text(text: str) -> None:
 
 def get_clipboard_text() -> str | None:
     """Read back CF_UNICODETEXT; None when the clipboard holds no text."""
-    for _attempt in range(20):
+    for _attempt in range(60):
         if user32.OpenClipboard(None):
             break
         time.sleep(0.05)

@@ -135,6 +135,17 @@ the cursor stays put so the tooltip survives long enough for a `win.see()`.
    user which processes (`possible_injectors`) are eating injected input —
    removing the hook software is the real fix.
 
+Replacing a field's existing text: there is no reliable select-all keystroke
+on hook-filtered machines (Ctrl+A is a combo and refuses; CEF ignores a
+posted Backspace). The dependable sequence is a triple click —
+`win.click(x, y, clicks=3)` selects the field's text — then `win.type` or
+`win.paste`, which replaces the selection. On machines with healthy
+SendInput, `win.key("ctrl+a")` first is fine too.
+
+Bare keys vs combos: when SendInput is swallowed, `win.key("enter")` and
+other modifier-less keys still work (posted to the foreground target); only
+combos like `ctrl+a` refuse, honestly.
+
 ## Coordinates
 
 `coordinate_space` accepts:
@@ -167,7 +178,10 @@ shifts and need no scaling at all.
 2. Otherwise use `win.see(app)` and vision.
 3. Prefer a known keyboard route; use a verified coordinate for a visible,
    low-risk target.
-4. Use targeted `win.ax` only when semantic identity or state matters.
+4. Use targeted `win.ax` only when semantic identity or state matters. For
+   CEF/Electron custom-drawn UI (music players, chat apps, game launchers)
+   the ax tree is often read-only or empty — go straight to screenshot +
+   coordinate clicks there instead of spending rounds on UIA patterns.
 5. Use `delivery="background"` only for apps already proven to accept it on
    this machine (classic Win32 controls, UIA patterns) — it is the quiet
    opt-in, not the default to probe with.

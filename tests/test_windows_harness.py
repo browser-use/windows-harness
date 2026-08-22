@@ -493,3 +493,29 @@ def test_background_hover_posts_mousemove_to_deepest_child(monkeypatch):
     result = inject.hover_screen(0xA0, (100, 200), delivery_mode="background")
     assert posted == [(0xC0, inject.WM_MOUSEMOVE)]
     assert result["target_hwnd"] == 0xC0
+
+
+def test_foreground_key_bare_key_falls_back_but_combo_refuses(monkeypatch):
+    """Swallowed SendInput: bare keys post to the foreground target; only
+    combos refuse (posted modifiers never reach GetKeyState)."""
+    from contextlib import contextmanager
+
+    from windows_harness import inject
+
+    @contextmanager
+    def fake_focus(hwnd, *, cloak=True, hold=False):
+        yield False
+
+    monkeypatch.setattr(inject, "cloaked_focus", fake_focus)
+    monkeypatch.setattr(inject, "_confirmed_foreground", lambda t, a: None)
+    monkeypatch.setattr(inject, "sendinput_healthy", lambda: False)
+    posted = []
+    monkeypatch.setattr(
+        inject, "post_key",
+        lambda t, k: posted.append(k) or {"mode": "message", "verified": False},
+    )
+    result = inject.foreground_key(1, "enter", cloak=True)
+    assert posted == ["enter"]
+    assert result["mode"] == "foreground-message"
+    with pytest.raises(inject.ForegroundError):
+        inject.foreground_key(1, "ctrl+a", cloak=True)
