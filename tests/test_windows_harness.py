@@ -261,3 +261,30 @@ def test_temp_screenshots_trimmed_and_cleaned(monkeypatch):
 
     win._cleanup_temp_shots()
     assert not any(path.exists() for path in kept)
+
+
+@pytest.mark.skipif(not is_interactive_desktop(), reason="no interactive desktop")
+def test_cli_exec_runs_snippet(capsys):
+    """argv-only invocation must work without any stdin plumbing."""
+    from windows_harness.cli import main
+
+    assert main(["exec", "print(len(win.list_apps()))"]) == 0
+    out = capsys.readouterr().out.strip()
+    assert out.isdigit()
+    assert main(["exec", "   "]) == 2
+
+
+@pytest.mark.skipif(not is_interactive_desktop(), reason="no interactive desktop")
+def test_cli_run_executes_script_file(tmp_path, capsys):
+    """File-based invocation reads UTF-8 and tolerates a BOM."""
+    from windows_harness.cli import main
+
+    script = tmp_path / "task.py"
+    script.write_bytes(
+        "﻿print(sum(len(a['windows']) for a in win.list_apps()))\n".encode("utf-8")
+    )
+    assert main(["run", str(script)]) == 0
+    assert capsys.readouterr().out.strip().isdigit()
+
+    missing = tmp_path / "nope.py"
+    assert main(["run", str(missing)]) == 1

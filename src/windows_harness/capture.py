@@ -43,7 +43,31 @@ class AccessibilityPermissionError(HarnessError):
 
 
 def _err(operation: str) -> OSError:
-    return HarnessError(f"{operation} failed: {ctypes.FormatError(ctypes.get_last_error())}")
+    code = ctypes.get_last_error()
+    detail = ctypes.FormatError(code)
+    if code == 0:
+        # Some calls fail without setting last-error (PrintWindow on hidden
+        # webview windows); echoing "operation completed successfully" as the
+        # reason would send the agent debugging in the wrong direction.
+        detail = "no diagnostic returned"
+    return HarnessError(f"{operation} failed: {detail}")
+
+
+def _capture_refusal_reason(hwnd: int, cause: Exception) -> str:
+    """Why a non-visible window cannot be captured right now, and what to do."""
+    if user32.IsIconic(hwnd):
+        state = "minimized"
+    elif is_cloaked(hwnd):
+        state = "cloaked"
+    elif not user32.IsWindowVisible(hwnd):
+        state = "hidden"  # e.g. a tray app whose window was dismissed
+    else:
+        state = "on screen but not rendering into the capture"
+    return (
+        f"background capture unavailable: window {hwnd:#x} is {state} and "
+        f"produced no pixels ({cause}). Restore/show the window once and "
+        "capture again, or read its structure through win.ax instead."
+    )
 
 
 def ensure_dpi_awareness() -> None:
@@ -372,9 +396,9 @@ def capture_window(hwnd: int) -> dict:
     fallback_used = False
     try:
         image = _print_window_capture(hwnd, width, height)
-    except HarnessError:
+    except HarnessError as exc:
         if not visible_on_screen:
-            raise
+            raise HarnessError(_capture_refusal_reason(hwnd, exc)) from exc
         image = _screen_capture_region(x, y, width, height)
         fallback_used = True
     else:

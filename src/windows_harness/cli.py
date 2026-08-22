@@ -99,7 +99,13 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="windows-harness",
         description="Execute Python with Windows app control and filesystem access.",
         epilog=(
-            "Typical usage:\n  windows-harness <<'PY'\n  print(win.see('Notepad'))\n  PY"
+            "Typical usage (identical in PowerShell, cmd, and bash):\n"
+            "  windows-harness see 'Notepad'\n"
+            "  windows-harness apps\n"
+            "  windows-harness run task.py        # win, Path, subprocess preloaded\n"
+            "  windows-harness exec \"print(len(win.list_apps()))\"\n"
+            "\n"
+            "Note: '<<' heredocs are bash-only; write a .py file and use run instead."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -107,6 +113,14 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("doctor", help="check the interactive desktop and runtime")
     subparsers.add_parser("apps", help="list processes that own windows")
     subparsers.add_parser("repl", help="start a persistent interactive Python session")
+    execute = subparsers.add_parser(
+        "exec", help="execute one Python snippet with win ready (argv-only)"
+    )
+    execute.add_argument("code", help="Python source; win, Path, subprocess are preloaded")
+    runner = subparsers.add_parser(
+        "run", help="execute a Python script file with win ready"
+    )
+    runner.add_argument("script", help="path to a .py file; win, Path, subprocess are preloaded")
     subparsers.add_parser("skill", help="print the Windows Harness skill")
     install = subparsers.add_parser("install-skill", help="install the skill into your agent skills directory")
     install.add_argument("--target", help="custom skills directory (e.g. ~/.claude/skills/windows-harness)")
@@ -167,6 +181,17 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(json.dumps(state, indent=2, ensure_ascii=False, default=str))
             return 0
+        if args.command == "exec":
+            return _execute(args.code)
+        if args.command == "run":
+            # utf-8-sig: a BOM left by PowerShell editors must not crash the run.
+            script = Path(args.script).expanduser()
+            try:
+                source = script.read_text(encoding="utf-8-sig")
+            except OSError as exc:
+                print(f"windows-harness: cannot read {script}: {exc}", file=sys.stderr)
+                return 1
+            return _execute(source)
         if args.command is None:
             if sys.stdin.isatty():
                 parser.print_help()

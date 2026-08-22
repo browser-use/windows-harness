@@ -19,6 +19,27 @@ PY
 The CLI preloads `win`, `Path`, and `subprocess`. Prefer bounded stdin programs;
 reserve `windows-harness repl` for manual exploration and always exit it.
 
+## How to invoke: exactly two forms
+
+One-off questions — use a subcommand (identical in PowerShell, cmd, and bash):
+
+```bash
+windows-harness apps                 # every process owning windows, as JSON
+windows-harness see "CC Switch"      # one screenshot -> JSON with its "path"
+windows-harness state "Notepad"      # UIA tree as JSON (--screenshot adds image)
+```
+
+Anything multi-step — write a `.py` file, then run it. No quoting or encoding
+traps in any shell; this is always the most reliable channel:
+
+```bash
+windows-harness run task.py          # win, Path, subprocess preloaded
+```
+
+Never use `<<'PY'` heredocs outside bash; never enumerate windows through
+hand-rolled C#/PowerShell — `win.list_apps()` already did it. Screenshots go
+to `%TEMP%` and are auto-cleaned unless you pass an explicit path.
+
 ## Minimize round trips
 
 - Bundle deterministic, reversible steps into one program, then verify once.
@@ -60,7 +81,9 @@ Every input primitive takes `delivery="background"` (default) or
 
 ## Use the small surface
 
-Think in six verbs: `see`, `key`, `type`, `click`, `ax`, `script`.
+Think in six verbs: `see`, `key`, `type`, `click`, `ax`, `script` — plus two
+inventory calls: `win.list_apps()` (processes with their window titles) and
+`win.windows(app)` (one app's windows).
 
 ```python
 frame = win.see("Notepad")
