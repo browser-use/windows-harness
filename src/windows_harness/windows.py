@@ -1,13 +1,15 @@
 """Direct Windows control through public Win32 and UI Automation APIs.
 
-The counterpart of ``macos.py``: one persistent process that can see any
-window, act on it, and report honestly how intrusive each action was.
+One persistent process that can see any window, act on it, and report
+honestly how intrusive each action was.
 
-Every input primitive takes ``delivery="background" | "foreground"``.
-Background (default) never fronts the target: it routes through synthetic
-pen injection or window messages, or raises :class:`BackgroundUnavailable`
-with a structured reason. Foreground is the agent's explicit escalation:
-a brief cloaked takeover, restored afterwards.
+Every input primitive takes ``delivery="foreground" | "background"``.
+Foreground (default) fronts the target and keeps it fronted across a burst
+of actions (``hold=True``) — focus-driven UI such as autocomplete popups
+closes the instant a window loses the foreground, so the harness holds it
+until ``win.release()``. Background is the opt-in quiet path: synthetic pen
+injection or window messages, never fronts, and refuses with
+:class:`BackgroundUnavailable` when the framework would silently drop input.
 """
 
 from __future__ import annotations
@@ -126,6 +128,7 @@ class Windows:
                 "observed_drops": delivery.observed_drops(),
                 "drops_path": str(delivery.config_dir() / "drops.json"),
             },
+            "scripts_dir": str(delivery.scripts_dir()),
             "note": (
                 "Elevated targets require an elevated harness (UIPI); "
                 "everything else needs no administrator rights."
@@ -200,6 +203,19 @@ class Windows:
         return index
 
     # --- focus guard -----------------------------------------------------------
+
+    def _focus_outcome(
+        self, before: int, operation: str, *, delivery: str, hold: bool
+    ) -> dict[str, Any]:
+        """Focus report for one action. A held foreground action is SUPPOSED
+        to leave the target fronted, so the repair guard must not undo it."""
+        if hold and delivery == "foreground":
+            return {
+                "foreground_before": before,
+                "foreground_after": current_foreground(),
+                "held": True,
+            }
+        return self._guard_focus(before, operation)
 
     def _guard_focus(self, before: int, operation: str) -> dict[str, Any]:
         """Restore the user's foreground if an action displaced it."""
@@ -367,12 +383,23 @@ class Windows:
                 "coordinates, or pass coordinate_space='screen'"
             )
         shot = self._last_screenshot
-        if coordinate_space == "screenshot":
+        if coordinate_space == "normalized":
+            # VLM-friendly 0..1000 grid over the window's client area —
+            # independent of screenshot resolution and DPI scaling.
+            if not (0.0 <= float(x) <= 1000.0 and 0.0 <= float(y) <= 1000.0):
+                raise HarnessError(
+                    f"normalized coordinates must be within 0..1000, got ({x}, {y})"
+                )
+            bounds = shot["client_bounds"]
+            x = float(x) / 1000.0 * float(bounds["width"])
+            y = float(y) / 1000.0 * float(bounds["height"])
+        elif coordinate_space == "screenshot":
             x = float(x) / float(shot["scale_x"])
             y = float(y) / float(shot["scale_y"])
         elif coordinate_space not in ("client", "window"):
             raise HarnessError(
-                "coordinate_space must be 'screenshot', 'client', or 'screen'"
+                "coordinate_space must be 'screenshot', 'normalized', "
+                "'client', or 'screen'"
             )
         screen_x, screen_y = client_to_screen(shot["hwnd"], x, y)
         return float(screen_x), float(screen_y)
@@ -421,6 +448,35 @@ class Windows:
     def hide_pointer(self) -> None:
         self._overlay.hide()
 
+    def hover(
+        self,
+        x: float,
+        y: float,
+        *,
+        app: str | None = None,
+        dwell: float = 0.6,
+        coordinate_space: str = "screenshot",
+        delivery: str = "foreground",
+        hold: bool = True,
+    ) -> dict[str, Any]:
+        """Really hover the point so tooltips and hover states fire.
+
+        Unlike ``win.move`` (which only animates the virtual pointer and
+        delivers no input), this moves the physical cursor — or injects a
+        pen hover — so the target's tooltip actually appears. Hover is
+        coordinate-routed: the target only needs to be unoccluded, not
+        foreground. The cursor stays put afterwards, because moving it away
+        dismisses the tooltip before anyone can read it; follow with
+        ``win.see()`` to read it.
+        """
+        hwnd, _info = self._resolve_hwnd(app)
+        point = self._screen_point(x, y, coordinate_space)
+        self._pointer_position = point
+        self._overlay.move(*point)
+        return inject.hover_screen(
+            hwnd, point, delivery_mode=delivery, hold=hold, dwell=dwell
+        )
+
     # --- input primitives --------------------------------------------------
 
     def click(
@@ -432,19 +488,22 @@ class Windows:
         button: str = "left",
         clicks: int = 1,
         coordinate_space: str = "screenshot",
-        delivery: str = "background",
+        delivery: str = "foreground",
+        hold: bool = True,
     ) -> dict[str, Any]:
-        """Coordinate click; background routes pen/message, foreground cloaks."""
+        """Coordinate click; foreground (default) fronts and holds the target,
+        background routes pen/message without disturbing the user."""
         hwnd, info = self._resolve_hwnd(app)
         point = self._screen_point(x, y, coordinate_space)
         focus_before = current_foreground()
         self._pointer_position = point
         self._overlay.move(*point)
         result = inject.click_screen(
-            hwnd, point, button=button, clicks=clicks, delivery_mode=delivery
+            hwnd, point, button=button, clicks=clicks, delivery_mode=delivery,
+            hold=hold,
         )
         self._overlay.click()
-        result["focus"] = self._guard_focus(focus_before, "click")
+        result["focus"] = self._focus_outcome(focus_before, "click", delivery=delivery, hold=hold)
         result["app"] = info
         hint = _click_delivery_hint(result, hwnd)
         if hint:
@@ -463,7 +522,8 @@ class Windows:
         coordinate_space: str = "screenshot",
         duration: float = 0.25,
         steps: int = 12,
-        delivery: str = "background",
+        delivery: str = "foreground",
+        hold: bool = True,
     ) -> dict[str, Any]:
         hwnd, _info = self._resolve_hwnd(app)
         start = self._screen_point(from_x, from_y, coordinate_space)
@@ -474,9 +534,9 @@ class Windows:
         self._overlay.move(*end, duration=duration)
         result = inject.drag(
             hwnd, start, end, button=button, steps=steps, duration=duration,
-            delivery_mode=delivery,
+            delivery_mode=delivery, hold=hold,
         )
-        result["focus"] = self._guard_focus(focus_before, "drag")
+        result["focus"] = self._focus_outcome(focus_before, "drag", delivery=delivery, hold=hold)
         return result
 
     def scroll(
@@ -488,7 +548,8 @@ class Windows:
         x: float | None = None,
         y: float | None = None,
         coordinate_space: str = "screenshot",
-        delivery: str = "background",
+        delivery: str = "foreground",
+        hold: bool = True,
     ) -> dict[str, Any]:
         if not delta_y and not delta_x:
             raise HarnessError("Provide a nonzero delta_y or delta_x")
@@ -505,23 +566,70 @@ class Windows:
         self._pointer_position = point
         self._overlay.move(*point)
         focus_before = current_foreground()
-        result = inject.scroll(hwnd, point, delta_y, delta_x, delivery_mode=delivery)
-        result["focus"] = self._guard_focus(focus_before, "scroll")
+        result = inject.scroll(hwnd, point, delta_y, delta_x, delivery_mode=delivery, hold=hold)
+        result["focus"] = self._focus_outcome(focus_before, "scroll", delivery=delivery, hold=hold)
         return result
 
-    def type(self, text: str, *, app: str | None = None, delivery: str = "background") -> dict[str, Any]:
+    def type(
+        self,
+        text: str,
+        *,
+        app: str | None = None,
+        x: float | None = None,
+        y: float | None = None,
+        coordinate_space: str = "screenshot",
+        delivery: str = "foreground",
+        hold: bool = True,
+    ) -> dict[str, Any]:
+        """Type text, optionally focusing a field at (x, y) first.
+
+        Focus-driven fields (search boxes with suggestion popups) only accept
+        input while focused; passing x/y clicks the field in the same call so
+        the focus-then-type sequence cannot be split by a focus loss.
+        """
         hwnd, _info = self._resolve_hwnd(app)
+        if (x is None) != (y is None):
+            raise HarnessError("Provide both x and y to focus a field before typing")
         focus_before = current_foreground()
-        result = inject.type_text(hwnd, text, delivery_mode=delivery)
-        result["focus"] = self._guard_focus(focus_before, "typing")
+        if x is not None and y is not None:
+            point = self._screen_point(x, y, coordinate_space)
+            self._pointer_position = point
+            self._overlay.move(*point)
+            inject.click_screen(hwnd, point, button="left", clicks=1,
+                                delivery_mode=delivery, hold=hold)
+            time.sleep(0.12)  # let the field's focus handlers settle
+        result = inject.type_text(hwnd, text, delivery_mode=delivery, hold=hold)
+        result["focus"] = self._focus_outcome(focus_before, "typing", delivery=delivery, hold=hold)
         return result
 
-    def key(self, key: str, *, app: str | None = None, delivery: str = "background") -> dict[str, Any]:
+    def key(self, key: str, *, app: str | None = None, delivery: str = "foreground", hold: bool = True) -> dict[str, Any]:
         hwnd, _info = self._resolve_hwnd(app)
         focus_before = current_foreground()
-        result = inject.press_key(hwnd, key, delivery_mode=delivery)
-        result["focus"] = self._guard_focus(focus_before, f"key {key!r}")
+        result = inject.press_key(hwnd, key, delivery_mode=delivery, hold=hold)
+        result["focus"] = self._focus_outcome(focus_before, f"key {key!r}", delivery=delivery, hold=hold)
         return result
+
+    def paste(self, text: str, *, app: str | None = None, delivery: str = "foreground", hold: bool = True) -> dict[str, Any]:
+        """Set the clipboard to `text` and paste it into the target.
+
+        The text route that survives swallowed SendInput: setting the
+        clipboard is a plain data handoff no hook filters, and only the
+        Ctrl+V trigger needs input. Focus the target field first (e.g.
+        ``win.type`` with x/y, or ``win.click``).
+        """
+        hwnd, _info = self._resolve_hwnd(app)
+        focus_before = current_foreground()
+        inject.set_clipboard_text(text)
+        result = inject.paste_text(hwnd, delivery_mode=delivery, hold=hold)
+        result["clipboard"] = text
+        result["focus"] = self._focus_outcome(focus_before, "paste", delivery=delivery, hold=hold)
+        return result
+
+    def release(self) -> dict[str, Any]:
+        """Give the foreground back to the window the user had before a held
+        burst. Safe to call when nothing is held."""
+        held = inject.release_hold()
+        return {"released": held is not None, "held": held}
 
     # --- verification --------------------------------------------------------
 

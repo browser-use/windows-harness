@@ -165,6 +165,13 @@ def config_dir() -> Path:
     return Path.home() / ".windows-harness"
 
 
+def scripts_dir() -> Path:
+    """Conventional home for agent-written task scripts (windows-harness run
+    resolves bare filenames here); keeps generated .py files out of the
+    caller's working directory."""
+    return config_dir() / "scripts"
+
+
 _OBSERVED_CACHE: tuple[float, dict[str, list[str]]] | None = None
 
 

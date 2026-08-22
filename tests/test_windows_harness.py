@@ -368,3 +368,128 @@ def test_focused_descendant_smoke():
         pytest.skip("no visible windows")
     result = focused_descendant(visible[0]["hwnd"])
     assert isinstance(result, int) and result >= 0
+
+
+def test_normalized_coordinates_map_over_client_bounds(monkeypatch):
+    """The 0..1000 grid maps onto the last screenshot's client area."""
+    from windows_harness import windows as windows_module
+
+    win = windows_module.Windows.__new__(windows_module.Windows)
+    win._last_window = {"hwnd": 42}
+    win._last_screenshot = {
+        "hwnd": 42,
+        "scale_x": 1.0,
+        "scale_y": 1.0,
+        "client_bounds": {"x": 100, "y": 200, "width": 800, "height": 600},
+    }
+    monkeypatch.setattr(
+        windows_module, "client_to_screen",
+        lambda hwnd, x, y: (100 + x, 200 + y),
+    )
+    assert win._screen_point(0, 0, "normalized") == (100.0, 200.0)
+    assert win._screen_point(1000, 1000, "normalized") == (900.0, 800.0)
+    assert win._screen_point(500, 250, "normalized") == (500.0, 350.0)
+    with pytest.raises(HarnessError):
+        win._screen_point(1200, 0, "normalized")
+
+
+def test_hold_keeps_foreground_and_release_restores(monkeypatch):
+    """hold=True fronts the target and never restores; release_hold does."""
+    from windows_harness import inject
+
+    monkeypatch.setattr(inject, "_HELD_FOREGROUND", None)
+    monkeypatch.setattr(inject, "current_foreground", lambda: 0xAAA)
+    monkeypatch.setattr(inject, "get_cursor", lambda: (0, 0))
+    monkeypatch.setattr(inject, "set_cursor", lambda x, y: None)
+    monkeypatch.setattr(inject.user32, "IsIconic", lambda h: False)
+    monkeypatch.setattr(inject.user32, "IsWindow", lambda h: True)
+    fronted = []
+    monkeypatch.setattr(
+        inject, "force_foreground", lambda h: fronted.append(h) or True
+    )
+    with inject.cloaked_focus(0xBBB, hold=True):
+        pass
+    assert fronted == [0xBBB]  # fronted once, never handed back
+    held = inject.release_hold()
+    assert held == {"previous": 0xAAA, "target": 0xBBB}
+    assert fronted == [0xBBB, 0xAAA]  # release restores the user's window
+    assert inject.release_hold() is None  # safe when nothing held
+
+
+def test_nonheld_focus_restores_immediately(monkeypatch):
+    """The classic (hold=False) path keeps its restore-after-action contract."""
+    from windows_harness import inject
+
+    monkeypatch.setattr(inject, "_HELD_FOREGROUND", None)
+    monkeypatch.setattr(inject, "current_foreground", lambda: 0xAAA)
+    monkeypatch.setattr(inject, "get_cursor", lambda: (0, 0))
+    monkeypatch.setattr(inject, "set_cursor", lambda x, y: None)
+    monkeypatch.setattr(inject.user32, "IsIconic", lambda h: False)
+    monkeypatch.setattr(inject, "set_cloak", lambda h, e: False)
+    fronted = []
+    monkeypatch.setattr(
+        inject, "force_foreground", lambda h: fronted.append(h) or True
+    )
+    with inject.cloaked_focus(0xBBB, cloak=True):
+        pass
+    assert fronted == [0xBBB, 0xAAA]  # fronted, then restored
+
+
+@pytest.mark.skipif(not is_interactive_desktop(), reason="no interactive desktop")
+def test_clipboard_text_roundtrip():
+    """Unicode (incl. CJK) survives the clipboard unchanged."""
+    from windows_harness import inject
+
+    original = inject.get_clipboard_text()
+    try:
+        inject.set_clipboard_text("harness-剪贴板-roundtrip")
+        assert inject.get_clipboard_text() == "harness-剪贴板-roundtrip"
+    finally:
+        inject.set_clipboard_text(original or "")
+
+
+def test_run_resolves_bare_filenames_in_scripts_dir(tmp_path, monkeypatch, capsys):
+    """`windows-harness run foo.py` falls back to the harness scripts dir."""
+    from windows_harness import cli
+
+    monkeypatch.setenv("WINDOWS_HARNESS_HOME", str(tmp_path))
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "bare_task.py").write_text(
+        "print('ran from scripts dir')", encoding="utf-8"
+    )
+    assert cli.main(["run", "bare_task.py"]) == 0
+    assert "ran from scripts dir" in capsys.readouterr().out
+
+
+def test_post_paste_sends_wm_paste_not_synthetic_ctrl_v(monkeypatch):
+    """A posted Ctrl+V degrades to a plain 'v' in CEF (its modifier never
+    reaches GetKeyState); the message fallback must post WM_PASTE instead."""
+    from windows_harness import inject
+
+    posted = []
+    monkeypatch.setattr(inject, "background_focus_window", lambda h: h)
+    monkeypatch.setattr(
+        inject, "post_message",
+        lambda hwnd, msg, wparam, lparam: posted.append(msg),
+    )
+    result = inject.post_paste(0xBEEF)
+    assert posted == [inject.WM_PASTE]
+    assert result["mode"] == "message"
+
+
+def test_background_hover_posts_mousemove_to_deepest_child(monkeypatch):
+    from windows_harness import inject
+
+    monkeypatch.setattr(inject.delivery, "post_message_blocked_by_uipi", lambda h: None)
+    monkeypatch.setattr(inject.delivery, "would_be_silently_dropped", lambda h, k: False)
+    monkeypatch.setattr(inject, "_deepest_child_at", lambda root, x, y: 0xC0)
+    monkeypatch.setattr(inject, "screen_to_client", lambda h, x, y: (x - 1, y - 2))
+    posted = []
+    monkeypatch.setattr(
+        inject, "post_message",
+        lambda hwnd, msg, wparam, lparam: posted.append((hwnd, msg)),
+    )
+    result = inject.hover_screen(0xA0, (100, 200), delivery_mode="background")
+    assert posted == [(0xC0, inject.WM_MOUSEMOVE)]
+    assert result["target_hwnd"] == 0xC0

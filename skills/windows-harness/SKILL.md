@@ -1,6 +1,6 @@
 ---
 name: windows-harness
-description: Control a whole Windows desktop from one persistent Python session with background screenshots, cua-style background input delivery (synthetic-pen injection, UIA patterns, window messages), a cloaked foreground escalation, an animated virtual pointer, targeted UI Automation, PowerShell, and filesystem access. Use for native, Electron, browser, dialog, file, or cross-app tasks while keeping the user's focus and cursor untouched wherever possible.
+description: Control a whole Windows desktop from one persistent Python session with foreground-first input (focus holding, SendInput with pen/message fallbacks), background screenshots, UI Automation, clipboard paste, PowerShell, and filesystem access. Use for native, Electron, browser, dialog, file, or cross-app tasks.
 ---
 
 # Windows Harness
@@ -36,6 +36,11 @@ traps in any shell; this is always the most reliable channel:
 windows-harness run task.py          # win, Path, subprocess preloaded
 ```
 
+Write generated task scripts to the harness scripts dir (printed by
+`windows-harness doctor` as `scripts_dir`, default
+`%USERPROFILE%\.windows-harness\scripts`); `run` resolves bare filenames
+there, so generated scripts never pollute the caller's working directory.
+
 Never use `<<'PY'` heredocs outside bash; never enumerate windows through
 hand-rolled C#/PowerShell — `win.list_apps()` already did it. Screenshots
 land in `%TEMP%\windows-harness-*.png` and persist: the returned `"path"`
@@ -43,56 +48,59 @@ stays readable after the CLI exits, so just open it. Set
 `WINDOWS_HARNESS_OVERLAY=off` to skip the pointer renderer for minimum
 latency.
 
-## Minimize round trips
+## Delivery: foreground first
 
-- Bundle deterministic, reversible steps into one program, then verify once.
-- Stop at a genuine decision boundary: ambiguous identity, new coordinates, an
-  irreversible action, or unexpected state.
-- Do not screenshot merely to confirm a known shortcut opened a field before
-  typing; let the final screenshot verify the whole sequence.
-- Poll exact UIA state inside the same Python program when possible.
-- Use the cheapest strong end-state check: one screenshot for visible state,
-  one exact UIA query for semantic state.
-
-## Delivery: two modes, one contract
-
-Every input primitive takes `delivery="background"` (default) or
-`delivery="foreground"`.
+Every input primitive takes `delivery="foreground"` (default) or
+`delivery="background"`.
 
 | mode | transports | disturbance |
 |---|---|---|
+| `foreground` (default) | front the target + SendInput; pen/message fallback when hook software swallows SendInput | the target comes to the front and STAYS (`hold=True`) until `win.release()` |
 | `background` | synthetic-pen injection, PostMessage, UIA patterns | none — never fronts, never moves the cursor |
-| `foreground` | cloaked SetForegroundWindow + SendInput; pen/message fallback when SendInput is filtered | one ~150 ms flicker, cursor restored |
 
-- `background` result carries `"mode": "pen" | "message"`, plus
-  `"verified": false` when the effect cannot be confirmed.
-- `windows-harness doctor` probes input health and reports
-  `input_health.sendinput`: `ok`, `swallowed` (hook software such as audio
-  enhancers or overlay recorders is eating injected events — possible
-  culprits listed under `possible_injectors`), or `unknown`. When SendInput
-  is swallowed, `foreground` actions automatically fall back to pen/message
-  transports against the now-foreground target (`"mode": "foreground-pen" |
-  "foreground-message"`); only key combos refuse, with the reason.
-- When a framework's input stack silently drops background events, the call
-  raises `BackgroundUnavailable` with `code`, `target_class`, and
-  `escalation: "foreground"`. Retry the SAME action with
-  `delivery="foreground"` exactly then — not preemptively. Foregrounding on a
-  guess steals the user's focus for nothing.
-- `foreground` results carry `"cloaked"`: whether the takeover was hidden.
-- Every result reports `focus` — the harness repairs the user's foreground
-  automatically if anything displaced it.
+Why foreground is the default: focus-driven UI (search boxes with suggestion
+popups, context menus, IME candidate windows) closes the instant its window
+loses the foreground, and CEF off-screen / XAML input stacks only accept
+message input while truly foreground and focused. Holding the foreground
+across a burst turns "sometimes works" into a procedure.
+
+- `win.release()` hands the foreground back to the user's previous window.
+  Call it when a task burst is done.
+- For one quick invisible action use `delivery="foreground", hold=False`
+  (cloaked ~150 ms takeover, restored after) or `delivery="background"`.
+- Foreground clicks use SendInput mouse events and do NOT summon the Windows
+  touch keyboard; synthetic pen/touch injection (background clicks) can pop
+  it up and wreck the focus chain — avoid pen taps into text fields.
+- `background` results carry `"mode": "pen" | "message"` plus
+  `"verified": false` when the effect cannot be confirmed. When a framework's
+  input stack silently drops background events the call raises
+  `BackgroundUnavailable` with a structured `code`; redo the SAME action with
+  default foreground delivery — do not probe more background transports.
+- `windows-harness doctor` reports `input_health.sendinput`: `ok`,
+  `swallowed` (hook software such as audio enhancers or overlay recorders is
+  eating injected events — suspects under `possible_injectors`), or
+  `unknown`. When SendInput is swallowed, foreground actions automatically
+  fall back to pen/message transports against the now-foreground target.
 
 ## Use the small surface
 
-Think in six verbs: `see`, `key`, `type`, `click`, `ax`, `script` — plus two
-inventory calls: `win.list_apps()` (processes with their window titles) and
-`win.windows(app)` (one app's windows).
+Think in seven verbs: `see`, `key`, `type`, `click`, `paste`, `ax`, `script`
+— plus two inventory calls: `win.list_apps()` (processes with their window
+titles) and `win.windows(app)` (one app's windows).
 
 ```python
 frame = win.see("Notepad")
 win.key("ctrl+s", app="Notepad")
-win.type("Alessia Cara", app="Notepad")
+win.type("Alessia Cara", app="Notepad")                    # type at the focused field
+win.type("Alessia Cara", app="Notepad", x=640, y=420)      # click the field, then type
 win.click(640, 420, app="Notepad")
+win.click(640, 420, app="Notepad", clicks=2)               # double click
+win.click(640, 420, app="Notepad", button="right")         # context menu
+win.drag(200, 300, 500, 600, app="Notepad")                # press, glide, release
+win.scroll(-720, app="Notepad")                            # wheel at window center (or x/y)
+win.hover(640, 420, app="Notepad")                         # really hover -> tooltip appears
+win.paste("Alessia Cara", app="Notepad")                   # clipboard paste (see ladder)
+win.release()                                              # hand the foreground back
 
 item = win.ax.at(640, 420, app="Notepad")
 win.ax.perform(item["element_index"], "invoke")
@@ -105,6 +113,54 @@ semantic actions use `win.ax.at()` + `win.ax.perform()`, and fill text fields
 with `win.ax.set_value()` (verified by read-back) when an element exposes a
 ValuePattern — no keystrokes at all.
 
+`win.hover(x, y)` delivers a real hover (physical cursor, or pen hover when
+SendInput is filtered) so tooltips and hover-only UI appear; `win.move(x, y)`
+only animates the virtual pointer and delivers no input. Hover is
+coordinate-routed — the target needs to be unoccluded, not foreground — and
+the cursor stays put so the tooltip survives long enough for a `win.see()`.
+
+## Text input ladder
+
+1. `win.ax.set_value()` when the element exposes a ValuePattern — verified by
+   read-back and works fully in the background.
+2. `win.type(text, x=..., y=...)` — focuses the field and types in one call.
+3. `win.paste(text)` — the clipboard route. Setting the clipboard is a plain
+   data handoff no hook software can filter; only the paste trigger needs
+   input (SendInput Ctrl+V, or a posted WM_PASTE when SendInput is filtered —
+   never a posted Ctrl+V, whose modifier never reaches GetKeyState). Focus
+   the target field first (a click, or `win.type` with x/y).
+4. If the paste trigger also fails: right-click the field and click the
+   context menu's Paste item (pen injection can drive the menu).
+5. When `doctor` reports `input_health.sendinput == "swallowed"`, tell the
+   user which processes (`possible_injectors`) are eating injected input —
+   removing the hook software is the real fix.
+
+## Coordinates
+
+`coordinate_space` accepts:
+
+- `'screenshot'` (default) — pixels of the latest `win.see()` image; the
+  returned `scale_x`/`scale_y` map them to the window.
+- `'normalized'` — a 0..1000 grid over the window's client area, independent
+  of screenshot resolution and DPI; use directly when the model outputs
+  normalized coordinates.
+- `'client'` / `'screen'` — raw window-client or physical screen pixels.
+
+When semantic identity matters, prefer element centers from the ax tree
+(`BoundingRectangle`) over vision-estimated pixels — they survive layout
+shifts and need no scaling at all.
+
+## Minimize round trips
+
+- Bundle deterministic, reversible steps into one program, then verify once.
+- Stop at a genuine decision boundary: ambiguous identity, new coordinates, an
+  irreversible action, or unexpected state.
+- Do not screenshot merely to confirm a known shortcut opened a field before
+  typing; let the final screenshot verify the whole sequence.
+- Poll exact UIA state inside the same Python program when possible.
+- Use the cheapest strong end-state check: one screenshot for visible state,
+  one exact UIA query for semantic state.
+
 ## Choose the lowest useful mode
 
 1. Use `win.script()` for a known exact command (Get-Process, registry reads).
@@ -112,6 +168,9 @@ ValuePattern — no keystrokes at all.
 3. Prefer a known keyboard route; use a verified coordinate for a visible,
    low-risk target.
 4. Use targeted `win.ax` only when semantic identity or state matters.
+5. Use `delivery="background"` only for apps already proven to accept it on
+   this machine (classic Win32 controls, UIA patterns) — it is the quiet
+   opt-in, not the default to probe with.
 
 After a failed verified burst, switch mode or stop. Never repair uncertainty
 with repeated keys, clicks, deletion loops, or bulk input.
@@ -123,26 +182,24 @@ with repeated keys, clicks, deletion loops, or bulk input.
   no vision round trip. Use a full `win.see()` only when you need to know
   WHAT changed, not THAT it changed. Animated windows (video, games) report
   change on their own; verify those semantically through `win.ax` instead.
-- When an action provably had no effect (verify_change negative AND the task
-  did not advance), record it once with `win.note_drop(kind)` — e.g.
+- When a background action provably had no effect (verify_change negative AND
+  the task did not advance), record it once with `win.note_drop(kind)` — e.g.
   `win.note_drop("text_input", app="...")`. Future background calls against
   that window class refuse honestly instead of repeating a dead transport.
-  `doctor` shows the recorded drops.
-- Tauri/WebView2 hosts: a background click may return `"mode": "message"`,
-  `"verified": false`, and change nothing (a `"hint"` field means exactly
-  this). Do not retry other coordinates — confirm once with
-  `win.verify_change()`, then `win.note_drop("mouse_click", app=...)` and
-  redo the same click with `delivery="foreground"`.
 
 ## Keep the invariants
 
+- Foreground `hold=True` keeps the target fronted across the whole burst;
+  always end a task with `win.release()` (or leave the window fronted
+  deliberately and say so).
 - Background delivery NEVER activates, raises, or moves the cursor. Occluded
   targets refuse with `background_occluded` rather than being raised.
 - Elevated (Administrator) targets are detected up front (UIPI preflight) and
   refused with `background_uipi_blocked`; run the harness elevated to drive them.
 - The animated pointer is click-through and never moves the physical cursor;
-  foreground rungs move it briefly and put it back.
-- Minimized windows are restored under the cloak and re-minimized afterwards.
+  non-held foreground rungs move it briefly and put it back.
+- Minimized windows are restored before foreground input and stay restored
+  under `hold=True`; non-held foreground rungs re-minimize afterwards.
 - Prefer semantic UIA patterns over simulated window chrome: frameworks that
   draw their own titlebar (WinUI3, Electron) may ignore posted WM_CLOSE and
   caption-button Invoke. The framework-neutral close is the WindowPattern —
@@ -150,10 +207,7 @@ with repeated keys, clicks, deletion loops, or bulk input.
   confirmation through `ax.perform(..., "invoke")`.
 - XAML apps (Win11 Notepad, Settings, UWP frames) refuse background typing —
   use `win.ax.set_value()` there; WPF refuses background drag and scroll —
-  use `delivery="foreground"`.
-- Screenshot coordinates come from the latest `win.see()` and preserve client
-  bounds and DPI scaling. `coordinate_space` accepts `'screenshot'`,
-  `'client'`, or `'screen'`.
+  use default foreground delivery.
 
 ## Browser tasks
 

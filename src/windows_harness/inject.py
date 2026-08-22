@@ -75,6 +75,7 @@ WM_MOUSEHWHEEL = 0x020E
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 WM_CHAR = 0x0102
+WM_PASTE = 0x0302
 
 MK_LBUTTON = 0x0001
 MK_RBUTTON = 0x0002
@@ -410,7 +411,17 @@ def force_foreground(target: int) -> bool:
         time.sleep(0.025)
         if _attached_set_foreground(target):
             return True
-    return False
+    # Last resort: the taskbar's own activation path. Unlike SetForeground-
+    # Window it needs no foreground token, so it still works when hook
+    # software swallowed the VK_NONAME tap above (observed on machines with
+    # Nahimic/QQLive-class hooks; QQMusic refused every SetForegroundWindow
+    # but yielded to this).
+    try:
+        user32.SwitchToThisWindow(wt.HWND(target), True)
+    except Exception:  # not present on some server SKUs
+        return False
+    time.sleep(0.05)
+    return current_foreground() == target
 
 
 def set_cloak(hwnd: int, enabled: bool) -> bool:
@@ -695,18 +706,46 @@ def suspect_injectors() -> list[str]:
     return sorted(found)
 
 
+_HELD_FOREGROUND: dict[str, int] | None = None
+
+
+def release_hold() -> dict[str, int] | None:
+    """Give the foreground back after a held burst; None when nothing held."""
+    global _HELD_FOREGROUND
+    held = _HELD_FOREGROUND
+    _HELD_FOREGROUND = None
+    if held is None:
+        return None
+    previous = held["previous"]
+    if (previous and previous != held["target"]
+            and user32.IsWindow(wt.HWND(previous))):
+        try:
+            force_foreground(previous)
+        except HarnessError:
+            pass
+    return held
+
+
 @contextmanager
-def cloaked_focus(hwnd: int, *, cloak: bool = True):
+def cloaked_focus(hwnd: int, *, cloak: bool = True, hold: bool = False):
     """Temporarily own the desktop on behalf of one background window.
 
-    Cloaks the target when the OS allows so the takeover is invisible, then
-    restores the previous foreground window and cursor position. Yields
-    whether cloaking actually happened — callers report it honestly.
+    Default behaviour cloaks the target when the OS allows so the takeover is
+    invisible, then restores the previous foreground window and cursor
+    position. Yields whether cloaking actually happened — callers report it
+    honestly.
+
+    ``hold=True`` is the interactive default: the target stays fronted and
+    visible afterwards, because focus-driven UI (autocomplete popups, menus)
+    closes the instant the window loses the foreground between two actions.
+    The previous foreground is remembered once and restored only by an
+    explicit :func:`release_hold`.
     """
+    global _HELD_FOREGROUND
     previous_foreground = current_foreground()
     previous_cursor = get_cursor()
     was_minimized = bool(user32.IsIconic(hwnd))
-    cloaked_ok = set_cloak(hwnd, True) if cloak else False
+    cloaked_ok = set_cloak(hwnd, True) if cloak and not hold else False
     if cloaked_ok:
         _journal_cloak(hwnd)  # a crash before uncloak must stay recoverable
     try:
@@ -717,27 +756,39 @@ def cloaked_focus(hwnd: int, *, cloak: bool = True):
             raise ForegroundError(
                 "could not bring the target window to the foreground"
             )
+        if hold:
+            if _HELD_FOREGROUND is None:
+                _HELD_FOREGROUND = {
+                    "previous": previous_foreground,
+                    "target": hwnd,
+                }
+            else:
+                _HELD_FOREGROUND["target"] = hwnd
         yield cloaked_ok
     finally:
-        # Give the foreground back BEFORE touching the target's placement so
-        # the user never sees a focus jump.
-        if previous_foreground and previous_foreground != hwnd:
+        # hold: the whole point is NOT giving the foreground back between
+        # actions — the window stays fronted until release_hold().
+        if not hold:
+            # Give the foreground back BEFORE touching the target's placement
+            # so the user never sees a focus jump.
+            if previous_foreground and previous_foreground != hwnd:
+                try:
+                    force_foreground(previous_foreground)
+                except HarnessError:
+                    pass
+            if was_minimized:
+                user32.ShowWindow(hwnd, SW_MINIMIZE)
+                time.sleep(0.02)
+            if cloaked_ok:
+                # Only drop the journal entry once the window is veribly
+                # visible again; a failed restore stays recoverable at next
+                # startup.
+                if set_cloak(hwnd, False):
+                    _unjournal_cloak(hwnd)
             try:
-                force_foreground(previous_foreground)
-            except HarnessError:
+                set_cursor(*previous_cursor)
+            except ForegroundError:
                 pass
-        if was_minimized:
-            user32.ShowWindow(hwnd, SW_MINIMIZE)
-            time.sleep(0.02)
-        if cloaked_ok:
-            # Only drop the journal entry once the window is veribly visible
-            # again; a failed restore stays recoverable at next startup.
-            if set_cloak(hwnd, False):
-                _unjournal_cloak(hwnd)
-        try:
-            set_cursor(*previous_cursor)
-        except ForegroundError:
-            pass
 
 
 # --- synthetic pen injection (inject.rs) -------------------------------------
@@ -1304,9 +1355,9 @@ def _confirmed_foreground(target: int, action: str) -> None:
         )
 
 
-def foreground_click(target: int, sx: int, sy: int, *, button: str, clicks: int, cloak: bool) -> dict:
+def foreground_click(target: int, sx: int, sy: int, *, button: str, clicks: int, cloak: bool, hold: bool = False) -> dict:
     down_flag, up_flag = _BUTTON_SENDINPUT[button]
-    with cloaked_focus(target, cloak=cloak) as cloaked_ok:
+    with cloaked_focus(target, cloak=cloak, hold=hold) as cloaked_ok:
         _confirmed_foreground(target, "click")
         if sendinput_healthy():
             set_cursor(sx, sy)
@@ -1326,8 +1377,8 @@ def foreground_click(target: int, sx: int, sy: int, *, button: str, clicks: int,
         return {"mode": "foreground-pen", "verified": False, "cloaked": cloaked_ok}
 
 
-def foreground_type_text(target: int, text: str, *, cloak: bool) -> dict:
-    with cloaked_focus(target, cloak=cloak) as cloaked_ok:
+def foreground_type_text(target: int, text: str, *, cloak: bool, hold: bool = False) -> dict:
+    with cloaked_focus(target, cloak=cloak, hold=hold) as cloaked_ok:
         _confirmed_foreground(target, "typing")
         if sendinput_healthy():
             previous_was_cr = False
@@ -1362,9 +1413,9 @@ def foreground_type_text(target: int, text: str, *, cloak: bool) -> dict:
         }
 
 
-def foreground_key(target: int, key: str, *, cloak: bool) -> dict:
+def foreground_key(target: int, key: str, *, cloak: bool, hold: bool = False) -> dict:
     base_vk, modifier_vks = parse_combo(key)
-    with cloaked_focus(target, cloak=cloak) as cloaked_ok:
+    with cloaked_focus(target, cloak=cloak, hold=hold) as cloaked_ok:
         _confirmed_foreground(target, f"key {key!r}")
         if not sendinput_healthy():
             raise ForegroundError(
@@ -1380,8 +1431,8 @@ def foreground_key(target: int, key: str, *, cloak: bool) -> dict:
         return {"mode": "foreground", "verified": True, "cloaked": cloaked_ok}
 
 
-def foreground_scroll(target: int, sx: int, sy: int, delta_y: int, delta_x: int = 0, *, cloak: bool) -> dict:
-    with cloaked_focus(target, cloak=cloak) as cloaked_ok:
+def foreground_scroll(target: int, sx: int, sy: int, delta_y: int, delta_x: int = 0, *, cloak: bool, hold: bool = False) -> dict:
+    with cloaked_focus(target, cloak=cloak, hold=hold) as cloaked_ok:
         _confirmed_foreground(target, "scroll")
         if sendinput_healthy():
             set_cursor(sx, sy)
@@ -1400,10 +1451,10 @@ def foreground_scroll(target: int, sx: int, sy: int, delta_y: int, delta_x: int 
         return {"mode": "foreground-message", "verified": False, "cloaked": cloaked_ok, **{k: v for k, v in result.items() if k == "target_hwnd"}}
 
 
-def foreground_drag(target: int, start: tuple[float, float], end: tuple[float, float], *, button: str, steps: int, duration: float, cloak: bool) -> dict:
+def foreground_drag(target: int, start: tuple[float, float], end: tuple[float, float], *, button: str, steps: int, duration: float, cloak: bool, hold: bool = False) -> dict:
     down_flag, up_flag = _BUTTON_SENDINPUT[button]
     move_flag = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE
-    with cloaked_focus(target, cloak=cloak) as cloaked_ok:
+    with cloaked_focus(target, cloak=cloak, hold=hold) as cloaked_ok:
         _confirmed_foreground(target, "drag")
         if sendinput_healthy():
             send_inputs((INPUT_MOUSE, {"dwFlags": down_flag}))
@@ -1420,6 +1471,121 @@ def foreground_drag(target: int, start: tuple[float, float], end: tuple[float, f
         return {"mode": "foreground-pen", "verified": False, "cloaked": cloaked_ok}
 
 
+# --- clipboard paste: the text route that survives swallowed SendInput ------
+#
+# Hook software eats injected KEY events, but nothing filters the clipboard.
+# Setting CF_UNICODETEXT is a plain data handoff; only the paste *trigger*
+# (Ctrl+V) needs input, and even that has a posted-message fallback. This is
+# the honest answer for CEF/Electron text fields on machines where the
+# health probe reports sendinput == "swallowed".
+
+CF_UNICODETEXT = 13
+GMEM_MOVEABLE = 0x0002
+
+user32.OpenClipboard.argtypes = (wt.HWND,)
+user32.GetClipboardData.restype = wt.HANDLE
+user32.GetClipboardData.argtypes = (wt.UINT,)
+user32.SetClipboardData.restype = wt.HANDLE
+user32.SetClipboardData.argtypes = (wt.UINT, wt.HANDLE)
+kernel32.GlobalAlloc.restype = wt.HANDLE
+kernel32.GlobalAlloc.argtypes = (wt.UINT, ctypes.c_size_t)
+kernel32.GlobalLock.restype = ctypes.c_void_p
+kernel32.GlobalLock.argtypes = (wt.HANDLE,)
+kernel32.GlobalUnlock.argtypes = (wt.HANDLE,)
+kernel32.GlobalSize.restype = ctypes.c_size_t
+kernel32.GlobalSize.argtypes = (wt.HANDLE,)
+
+
+def set_clipboard_text(text: str) -> None:
+    """Place Unicode text on the clipboard; retry while another app holds it."""
+    data = text.encode("utf-16-le") + b"\x00\x00"
+    for _attempt in range(20):
+        if user32.OpenClipboard(None):
+            break
+        time.sleep(0.05)
+    else:
+        raise HarnessError("OpenClipboard failed: another process holds the clipboard")
+    try:
+        user32.EmptyClipboard()
+        handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+        if not handle:
+            raise HarnessError("GlobalAlloc failed for clipboard payload")
+        locked = kernel32.GlobalLock(handle)
+        if not locked:
+            kernel32.GlobalFree(handle)
+            raise HarnessError("GlobalLock failed for clipboard payload")
+        try:
+            ctypes.memmove(locked, data, len(data))
+        finally:
+            kernel32.GlobalUnlock(handle)
+        if not user32.SetClipboardData(CF_UNICODETEXT, handle):
+            kernel32.GlobalFree(handle)
+            raise HarnessError(
+                "SetClipboardData failed: "
+                f"{ctypes.FormatError(ctypes.get_last_error())}"
+            )
+    finally:
+        user32.CloseClipboard()
+
+
+def get_clipboard_text() -> str | None:
+    """Read back CF_UNICODETEXT; None when the clipboard holds no text."""
+    for _attempt in range(20):
+        if user32.OpenClipboard(None):
+            break
+        time.sleep(0.05)
+    else:
+        return None
+    try:
+        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        if not handle:
+            return None
+        locked = kernel32.GlobalLock(handle)
+        if not locked:
+            return None
+        try:
+            return ctypes.wstring_at(locked)
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+
+
+def _ctrl_v_events() -> list[tuple[int, dict]]:
+    vk_c, vk_v = VK_CONTROL, ord("V")
+    return [
+        _keyboard_input(vk_c),
+        _keyboard_input(vk_v),
+        _keyboard_input(vk_v, up=True),
+        _keyboard_input(vk_c, up=True),
+    ]
+
+
+def post_paste(target: int) -> dict:
+    """WM_PASTE to the focused descendant: the standard edit message, honoured
+    by classic controls AND CEF hosts. A posted Ctrl+V is NOT a substitute —
+    its modifier never reaches GetKeyState, so CEF degrades it to a plain
+    'v' keystroke (observed end-to-end on QQMusic)."""
+    field = background_focus_window(target)
+    post_message(field, WM_PASTE, 0, 0)
+    return {"mode": "message", "verified": False, "target_hwnd": field}
+
+
+def foreground_paste(target: int, *, cloak: bool, hold: bool = False) -> dict:
+    with cloaked_focus(target, cloak=cloak, hold=hold) as cloaked_ok:
+        _confirmed_foreground(target, "paste")
+        if sendinput_healthy():
+            send_inputs(*_ctrl_v_events())
+            return {"mode": "foreground", "verified": True, "cloaked": cloaked_ok}
+        result = post_paste(target)
+        return {
+            "mode": "foreground-message",
+            "verified": False,
+            "cloaked": cloaked_ok,
+            "target_hwnd": result.get("target_hwnd"),
+        }
+
+
 # --- dispatchers (tools/impl_.rs click/type/hotkey/scroll orchestration) ------
 
 
@@ -1428,11 +1594,58 @@ def _check_delivery(delivery_mode: str) -> None:
         raise HarnessError("delivery must be 'background' or 'foreground'")
 
 
-def click_screen(target: int, point: tuple[float, float], *, button: str, clicks: int, delivery_mode: str) -> dict:
+def hover_screen(target: int, point: tuple[float, float], *, delivery_mode: str, hold: bool = False, dwell: float = 0.6) -> dict:
+    """Hover the physical cursor over a point so tooltips/hover states fire.
+
+    Hover is coordinate-routed, not focus-routed: the target does not need
+    the foreground for its tooltip to appear, only to be unoccluded at the
+    point. The cursor is left in place — moving it away dismisses the
+    tooltip before anyone can read it.
+    """
     _check_delivery(delivery_mode)
     sx, sy = int(point[0]), int(point[1])
     if delivery_mode == "foreground":
-        return foreground_click(target, sx, sy, button=button, clicks=clicks, cloak=True)
+        if not target_visible_at_point(target, sx, sy):
+            raise delivery.refuse_background(
+                target, delivery.MOUSE_MOVE,
+                f"target is occluded at screen point ({sx},{sy}); hover "
+                "would land on another window",
+            )
+        if not sendinput_healthy():
+            # Pen INRANGE without contact is a genuine hover and survives
+            # hook filtering of SendInput.
+            _pen_hover(sx, sy)
+            return {"mode": "foreground-pen", "verified": False}
+        set_cursor(sx, sy)
+        time.sleep(max(0.0, dwell))
+        return {"mode": "foreground", "verified": True}
+    blocked = delivery.post_message_blocked_by_uipi(target)
+    if blocked:
+        raise delivery.refuse_background(target, delivery.MOUSE_MOVE, blocked)
+    if delivery.would_be_silently_dropped(target, delivery.MOUSE_MOVE):
+        raise delivery.refuse_background(target, delivery.MOUSE_MOVE)
+    child = _deepest_child_at(target, sx, sy)
+    cx, cy = screen_to_client(child, sx, sy)
+    post_message(child, WM_MOUSEMOVE, 0, pack_lparam(cx, cy))
+    return {"mode": "message", "verified": False, "target_hwnd": child}
+
+
+def _pen_hover(sx: int, sy: int) -> None:
+    """Synthetic pen in range but not in contact == hover, no cursor move."""
+    hover = _pen_info(sx, sy, POINTER_FLAG_INRANGE | POINTER_FLAG_UPDATE, False)
+
+    def act(device: int) -> None:
+        if not InjectSyntheticPointerInput(device, ctypes.byref(hover), 1):
+            raise _PenInjectionFailed(ctypes.FormatError(ctypes.get_last_error()))
+
+    _with_pointer_device(PT_PEN, act)
+
+
+def click_screen(target: int, point: tuple[float, float], *, button: str, clicks: int, delivery_mode: str, hold: bool = False) -> dict:
+    _check_delivery(delivery_mode)
+    sx, sy = int(point[0]), int(point[1])
+    if delivery_mode == "foreground":
+        return foreground_click(target, sx, sy, button=button, clicks=clicks, cloak=True, hold=hold)
 
     blocked = delivery.post_message_blocked_by_uipi(target)
     if blocked:
@@ -1447,10 +1660,10 @@ def click_screen(target: int, point: tuple[float, float], *, button: str, clicks
     return post_click_screen(target, sx, sy, button=button, clicks=clicks)
 
 
-def type_text(target: int, text: str, *, delivery_mode: str) -> dict:
+def type_text(target: int, text: str, *, delivery_mode: str, hold: bool = False) -> dict:
     _check_delivery(delivery_mode)
     if delivery_mode == "foreground":
-        return foreground_type_text(target, text, cloak=True)
+        return foreground_type_text(target, text, cloak=True, hold=hold)
     blocked = delivery.post_message_blocked_by_uipi(target)
     if blocked:
         raise delivery.refuse_background(target, delivery.TEXT_INPUT, blocked)
@@ -1459,10 +1672,10 @@ def type_text(target: int, text: str, *, delivery_mode: str) -> dict:
     return post_type_text(target, text)
 
 
-def press_key(target: int, key: str, *, delivery_mode: str) -> dict:
+def press_key(target: int, key: str, *, delivery_mode: str, hold: bool = False) -> dict:
     _check_delivery(delivery_mode)
     if delivery_mode == "foreground":
-        return foreground_key(target, key, cloak=True)
+        return foreground_key(target, key, cloak=True, hold=hold)
     _base, modifiers = parse_combo(key)
     kind = delivery.KEY_COMBO if modifiers else delivery.KEYSTROKE
     blocked = delivery.post_message_blocked_by_uipi(target)
@@ -1473,11 +1686,11 @@ def press_key(target: int, key: str, *, delivery_mode: str) -> dict:
     return post_key(target, key)
 
 
-def scroll(target: int, point: tuple[float, float], delta_y: int, delta_x: int = 0, *, delivery_mode: str) -> dict:
+def scroll(target: int, point: tuple[float, float], delta_y: int, delta_x: int = 0, *, delivery_mode: str, hold: bool = False) -> dict:
     _check_delivery(delivery_mode)
     sx, sy = int(point[0]), int(point[1])
     if delivery_mode == "foreground":
-        return foreground_scroll(target, sx, sy, delta_y, delta_x, cloak=True)
+        return foreground_scroll(target, sx, sy, delta_y, delta_x, cloak=True, hold=hold)
     blocked = delivery.post_message_blocked_by_uipi(target)
     if blocked:
         raise delivery.refuse_background(target, delivery.MOUSE_SCROLL, blocked)
@@ -1486,10 +1699,23 @@ def scroll(target: int, point: tuple[float, float], delta_y: int, delta_x: int =
     return post_scroll(target, sx, sy, delta_y, delta_x)
 
 
-def drag(target: int, start: tuple[float, float], end: tuple[float, float], *, button: str, steps: int, duration: float, delivery_mode: str) -> dict:
+def paste_text(target: int, *, delivery_mode: str, hold: bool = False) -> dict:
+    """Paste the current clipboard content into the target window."""
     _check_delivery(delivery_mode)
     if delivery_mode == "foreground":
-        return foreground_drag(target, start, end, button=button, steps=steps, duration=duration, cloak=True)
+        return foreground_paste(target, cloak=True, hold=hold)
+    blocked = delivery.post_message_blocked_by_uipi(target)
+    if blocked:
+        raise delivery.refuse_background(target, delivery.TEXT_INPUT, blocked)
+    if delivery.would_be_silently_dropped(target, delivery.TEXT_INPUT):
+        raise delivery.refuse_background(target, delivery.TEXT_INPUT)
+    return post_paste(target)
+
+
+def drag(target: int, start: tuple[float, float], end: tuple[float, float], *, button: str, steps: int, duration: float, delivery_mode: str, hold: bool = False) -> dict:
+    _check_delivery(delivery_mode)
+    if delivery_mode == "foreground":
+        return foreground_drag(target, start, end, button=button, steps=steps, duration=duration, cloak=True, hold=hold)
     blocked = delivery.post_message_blocked_by_uipi(target)
     if blocked:
         raise delivery.refuse_background(target, delivery.MOUSE_CLICK, blocked)

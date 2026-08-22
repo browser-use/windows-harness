@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .capture import HarnessError
+from .delivery import scripts_dir
 from .windows import Windows
 
 
@@ -195,6 +196,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run":
             # utf-8-sig: a BOM left by PowerShell editors must not crash the run.
             script = Path(args.script).expanduser()
+            if not script.is_file():
+                # Agent-written task scripts live in the harness scripts dir
+                # by convention; resolve bare filenames against it.
+                candidate = scripts_dir() / args.script
+                if candidate.is_file():
+                    script = candidate
             try:
                 source = script.read_text(encoding="utf-8-sig")
             except OSError as exc:
