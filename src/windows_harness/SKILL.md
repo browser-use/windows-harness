@@ -39,7 +39,12 @@ windows-harness run task.py          # win, Path, subprocess preloaded
 Write generated task scripts to the harness scripts dir (printed by
 `windows-harness doctor` as `scripts_dir`, default
 `%USERPROFILE%\.windows-harness\scripts`); `run` resolves bare filenames
-there, so generated scripts never pollute the caller's working directory.
+there. Never write task scripts into the caller's working directory or
+invent ad-hoc folders like `.windows-harness-temp/` — they pollute the
+user's repo and show up as untracked files. Never run them via
+`python script.py` / `python -c` either: bypassing `windows-harness run`
+also bypasses the preloaded `win` session, so every call pays a fresh
+interpreter start and loses the element table behind `element_index`.
 
 Never use `<<'PY'` heredocs outside bash; never enumerate windows through
 hand-rolled C#/PowerShell — `win.list_apps()` already did it. Screenshots
