@@ -152,10 +152,23 @@ combos like `ctrl+a` refuse, honestly.
 
 - `'screenshot'` (default) — pixels of the latest `win.see()` image; the
   returned `scale_x`/`scale_y` map them to the window.
-- `'normalized'` — a 0..1000 grid over the window's client area, independent
-  of screenshot resolution and DPI; use directly when the model outputs
-  normalized coordinates.
+- `'normalized'` — a 0..1000 grid over the client area of the window from the
+  latest `win.see()`, independent of screenshot resolution and DPI; use
+  directly when the model outputs normalized coordinates:
+
+  ```python
+  frame = win.see("Notepad")                          # anchors the window
+  win.click(500, 48, app="Notepad", coordinate_space="normalized")
+  ```
+
+  The window's origin is resolved live at click time, so the window may move
+  between `see()` and `click()`; only a resize invalidates the grid — take a
+  fresh `see()` after any resize.
 - `'client'` / `'screen'` — raw window-client or physical screen pixels.
+
+Every positional primitive (`click`, `double/right click`, `drag`, `scroll`
+with x/y, `type` with x/y, `hover`) accepts `coordinate_space`; the
+normalized grid works for all of them.
 
 When semantic identity matters, prefer element centers from the ax tree
 (`BoundingRectangle`) over vision-estimated pixels — they survive layout
