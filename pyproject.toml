@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "windows-harness"
-version = "0.1.0"
+version = "0.2.0"
 description = "The simplest, thinnest harness that gives an LLM complete freedom to complete virtually any task on Windows."
 readme = "README.md"
 requires-python = ">=3.10"
