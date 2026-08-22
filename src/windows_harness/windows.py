@@ -12,11 +12,9 @@ a brief cloaked takeover, restored afterwards.
 
 from __future__ import annotations
 
-import atexit
 import subprocess
 import tempfile
 import time
-from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -57,8 +55,11 @@ class FocusChangedError(HarnessError):
 # indices fail with an honest error instead of pinning COM references forever.
 _ELEMENT_CACHE_LIMIT = 4096
 
-# Auto-generated screenshot files kept on disk before the oldest is deleted.
-_TEMP_SHOT_KEEP = 64
+# Auto-generated screenshots land in %TEMP% under this prefix and simply
+# persist — agents read the returned path long after the producing process
+# exits, so nothing deletes them proactively. Clean
+# `%TEMP%\windows-harness-*.png` manually if they pile up.
+_TEMP_SHOT_PREFIX = "windows-harness-"
 
 
 class Windows:
@@ -74,12 +75,10 @@ class Windows:
         inject.recover_abandoned_cloaks()
         self._elements: dict[int, Any] = {}
         self._element_seq = 0
-        self._temp_shots: deque[Path] = deque(maxlen=_TEMP_SHOT_KEEP)
         self._last_window: dict[str, Any] | None = None
         self._last_screenshot: dict[str, Any] | None = None
         self._pointer_position: tuple[float, float] | None = None
         self._overlay = LivePointerOverlay()
-        atexit.register(self._cleanup_temp_shots)
         self.ax = Accessibility(self)
 
     # --- runtime report ----------------------------------------------------
@@ -223,34 +222,14 @@ class Windows:
     def _save_shot(self, image: Any, path: str | Path | None) -> Path:
         if path is None:
             with tempfile.NamedTemporaryFile(
-                prefix="windows-harness-", suffix=".png", delete=False
+                prefix=_TEMP_SHOT_PREFIX, suffix=".png", delete=False
             ) as handle:
                 output = Path(handle.name)
-            self._track_temp_shot(output)
         else:
             output = Path(path).expanduser().resolve()
             output.parent.mkdir(parents=True, exist_ok=True)
         image.save(output, format="PNG", compress_level=1)
         return output
-
-    def _track_temp_shot(self, output: Path) -> None:
-        """Auto-generated screenshots are transient vision inputs: keep only
-        the newest handful so a long session cannot fill %TEMP%."""
-        while len(self._temp_shots) >= self._temp_shots.maxlen:
-            victim = self._temp_shots.popleft()
-            try:
-                victim.unlink(missing_ok=True)
-            except OSError:
-                pass
-        self._temp_shots.append(output)
-
-    def _cleanup_temp_shots(self) -> None:
-        while self._temp_shots:
-            victim = self._temp_shots.popleft()
-            try:
-                victim.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     def capture_screenshot(
         self,

@@ -242,25 +242,17 @@ def test_element_indices_monotonic_and_eviction_honest(monkeypatch):
 
 
 @pytest.mark.skipif(not is_interactive_desktop(), reason="no interactive desktop")
-def test_temp_screenshots_trimmed_and_cleaned(monkeypatch):
-    """Auto-generated shots are bounded on disk and removed at exit."""
+def test_default_screenshot_path_persists():
+    """Auto-generated shots must outlive the producing process — agents read
+    the returned path only afterwards. Nothing may delete them proactively."""
     from PIL import Image
 
-    from windows_harness import windows as windows_module
     from windows_harness.windows import Windows
 
-    monkeypatch.setattr(windows_module, "_TEMP_SHOT_KEEP", 3)
     win = Windows()
-    image = Image.new("RGB", (4, 4))
-    paths = [win._save_shot(image, None) for _ in range(6)]
-
-    kept = list(win._temp_shots)
-    assert len(kept) == 3
-    assert all(path.exists() for path in kept)
-    assert not any(path.exists() for path in paths[:3])  # oldest evicted
-
-    win._cleanup_temp_shots()
-    assert not any(path.exists() for path in kept)
+    output = win._save_shot(Image.new("RGB", (4, 4)), None)
+    assert output.exists()
+    assert output.name.startswith("windows-harness-")
 
 
 @pytest.mark.skipif(not is_interactive_desktop(), reason="no interactive desktop")

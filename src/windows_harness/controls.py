@@ -6,13 +6,12 @@ from typing import TYPE_CHECKING, Any, Iterable
 
 from .capture import HarnessError
 
-try:
-    import uiautomation as auto
-except ImportError:  # pragma: no cover - exercised when deps are missing
-    auto = None
-
 if TYPE_CHECKING:
     from .windows import Windows
+
+# Bound lazily by _require_uia(): importing uiautomation up front would tax
+# every CLI call (see/apps/exec/run) that never touches the UIA tree.
+auto: Any = None
 
 
 _COMPACT_ATTRIBUTES = (
@@ -47,11 +46,16 @@ _PATTERN_METHODS = {
 
 
 def _require_uia() -> None:
+    global auto
     if auto is None:
-        raise HarnessError(
-            "The uiautomation package is unavailable. Install project "
-            "dependencies first: `uv sync` or `pip install -e .`"
-        )
+        try:
+            import uiautomation as uia
+        except ImportError as exc:  # pragma: no cover - exercised when deps are missing
+            raise HarnessError(
+                "The uiautomation package is unavailable. Install project "
+                "dependencies first: `uv sync` or `pip install -e .`"
+            ) from exc
+        auto = uia
 
 
 class Accessibility:

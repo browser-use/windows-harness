@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import os
 import subprocess
 import sys
 from typing import Any
@@ -84,6 +85,12 @@ class LivePointerOverlay:
                 pass
 
     def _start(self) -> None:
+        # Spawning the Tk renderer costs ~0.5 s; agents that want minimum
+        # latency per action can opt out without touching any other behaviour.
+        if os.environ.get("WINDOWS_HARNESS_OVERLAY", "").strip().casefold() in (
+            "off", "0", "false", "no",
+        ):
+            return
         self._process = subprocess.Popen(
             [sys.executable, "-m", "windows_harness.overlay_helper"],
             stdin=subprocess.PIPE,

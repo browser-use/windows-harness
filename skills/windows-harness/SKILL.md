@@ -37,8 +37,11 @@ windows-harness run task.py          # win, Path, subprocess preloaded
 ```
 
 Never use `<<'PY'` heredocs outside bash; never enumerate windows through
-hand-rolled C#/PowerShell — `win.list_apps()` already did it. Screenshots go
-to `%TEMP%` and are auto-cleaned unless you pass an explicit path.
+hand-rolled C#/PowerShell — `win.list_apps()` already did it. Screenshots
+land in `%TEMP%\windows-harness-*.png` and persist: the returned `"path"`
+stays readable after the CLI exits, so just open it. Set
+`WINDOWS_HARNESS_OVERLAY=off` to skip the pointer renderer for minimum
+latency.
 
 ## Minimize round trips
 

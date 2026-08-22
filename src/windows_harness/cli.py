@@ -25,6 +25,7 @@ def _namespace() -> dict[str, Any]:
 
 
 def _execute(source: str) -> int:
+    source = source.lstrip(chr(0xFEFF))  # a piped BOM must not reach compile()
     if not source.strip():
         print("No Python code received on stdin", file=sys.stderr)
         return 2

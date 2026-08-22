@@ -214,6 +214,24 @@ def windows_for_process(pid: int) -> list[dict]:
     return sorted(windows, key=order)
 
 
+def _no_match_error(query: str, windows: list[dict]) -> str:
+    """No-match error that names the closest real targets, so the agent can
+    retry with a correct name instead of burning a round trip on discovery."""
+    import difflib
+
+    labels: dict[str, str] = {}
+    for window in windows:
+        for label in {window["title"], window["process"]}:
+            if label:
+                labels.setdefault(label.casefold(), label)
+    close = difflib.get_close_matches(
+        str(query).casefold(), list(labels), n=3, cutoff=0.5
+    )
+    hints = ", ".join(labels[key] for key in close)
+    suffix = f" — closest: {hints}" if hints else ""
+    return f"No matching window for {query!r}{suffix}"
+
+
 def resolve_hwnd(query: str) -> tuple[int, dict]:
     """Resolve a PID, exe name, path fragment, or window title to one window.
 
@@ -221,9 +239,10 @@ def resolve_hwnd(query: str) -> tuple[int, dict]:
     macOS harness's ``_resolve_app`` behaviour.
     """
     needle = str(query).casefold()
+    all_windows = enumerate_windows()
     exact: list[dict] = []
     candidates: list[dict] = []
-    for window in enumerate_windows():
+    for window in all_windows:
         lowered = [
             str(window["hwnd"]),
             str(window["pid"]).casefold(),
@@ -245,7 +264,7 @@ def resolve_hwnd(query: str) -> tuple[int, dict]:
         and window["bounds"][3] - window["bounds"][1] >= 40
     ]
     if not matches:
-        raise HarnessError(f"No matching window for {query!r}")
+        raise HarnessError(_no_match_error(query, all_windows))
 
     def area(window: dict) -> int:
         left, top, right, bottom = window["bounds"]
