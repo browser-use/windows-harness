@@ -26,10 +26,15 @@ from . import inject
 from .annotation import annotate as annotate_image
 from .capture import (
     HarnessError,
+    StaleWindowError,
+    anchor_health,
     capture_window,
+    client_bounds,
+    dpi_health,
     ensure_dpi_awareness,
     is_interactive_desktop,
     list_processes,
+    process_dpi_awareness,
     process_image_name,
     resolve_hwnd,
     windows_for_process,
@@ -140,6 +145,7 @@ class Windows:
             "platform": "Windows",
             "interactive_desktop": is_interactive_desktop(),
             "elevated": _IS_ADMIN,
+            "dpi": dpi_health(process_dpi_awareness()),
             "uiautomation": uia_ok,
             "synthetic_pointer": pen_ok,
             "input_health": {
@@ -547,6 +553,26 @@ class Windows:
         # bounds are the same geometry the screenshot was built from, so the
         # mapping stays consistent with the image the agent is looking at.
         bounds = shot["client_bounds"]
+        # Refuse a stale anchor: if the window was moved/resized since the
+        # screenshot, screenshot-space coordinates no longer reflect reality
+        # (and the action-proof would lie). The -32000 iconified/foreground
+        # handoff is the one transient we deliberately keep frozen through.
+        try:
+            life_state = anchor_health(
+                shot["client_bounds"], client_bounds(shot["hwnd"])
+            )
+        except HarnessError:
+            # Window vanished or hwnd invalid (e.g. unit tests): let the
+            # action fail downstream instead of mis-reporting a stale anchor.
+            life_state = "ok"
+        if life_state in ("moved", "resized"):
+            title = (self._last_window or {}).get("title") or str(shot["hwnd"])
+            raise StaleWindowError(
+                f"Window #{shot['hwnd']} '{title}' was {life_state} since the "
+                f"last screenshot; its saved client anchor no longer matches. "
+                f"Call win.see(...) to re-capture the screenshot and refresh "
+                f"the anchor before coordinate actions."
+            )
         screen_x = float(bounds["x"]) + x
         screen_y = float(bounds["y"]) + y
         return screen_x, screen_y
@@ -731,8 +757,6 @@ class Windows:
         if x is not None and y is not None:
             point = self._screen_point(x, y, coordinate_space)
         else:
-            from .capture import client_bounds
-
             bounds = client_bounds(hwnd)
             point = (bounds[0] + bounds[2] / 2.0, bounds[1] + bounds[3] / 2.0)
             # A transient client-bounds read during a foreground/cloak handoff

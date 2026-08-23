@@ -9,7 +9,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from windows_harness.capture import (  # noqa: E402
     HarnessError,
+    anchor_health,
     capture_window,
+    dpi_health,
     enumerate_windows,
     is_interactive_desktop,
     resolve_hwnd,
@@ -25,6 +27,32 @@ from windows_harness.inject import (  # noqa: E402
     vk_for_key,
 )
 from windows_harness.pointer import POINTER_HOTSPOT, pointer_points  # noqa: E402
+
+
+def test_anchor_health_classifies_window_movement():
+    """A moved/resized window turns the frozen anchor into a stale one, but the
+    -32000 iconified handoff stays "offscreen" (keep the frozen anchor)."""
+    frozen = {"x": 939, "y": 594, "width": 1575, "height": 1050}
+    assert anchor_health(frozen, (939, 594, 1575, 1050)) == "ok"
+    # Pure translation, size unchanged -> stale.
+    assert anchor_health(frozen, (951, 646, 1575, 1050)) == "moved"
+    # Sub-tolerance jitter is not a real move.
+    assert anchor_health(frozen, (940, 596, 1575, 1050)) == "ok"
+    # Client size change -> the screenshot's scale is stale.
+    assert anchor_health(frozen, (939, 594, 1500, 1000)) == "resized"
+    # The documented iconified/foreground-handoff transient must NOT be a move.
+    assert anchor_health(frozen, (-32000, -32000, 1, 1)) == "offscreen"
+    assert anchor_health(frozen, (-32000, -32000, 0, 0)) == "offscreen"
+
+
+def test_dpi_health_classifies_awareness():
+    """Only per-monitor awareness is healthy; others are reported as risks."""
+    assert dpi_health(2)["ok"] is True
+    assert dpi_health(2)["awareness"] == "per_monitor"
+    for value in (0, 1):
+        assert dpi_health(value)["ok"] is False
+    assert dpi_health(-1)["awareness"] == "unknown"
+    assert dpi_health(-1)["ok"] is False
 
 
 def test_pointer_geometry_scales_around_hotspot():

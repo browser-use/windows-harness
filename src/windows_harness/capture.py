@@ -42,6 +42,16 @@ class AccessibilityPermissionError(HarnessError):
     """UI Automation is unavailable on this desktop."""
 
 
+class StaleWindowError(HarnessError):
+    """The screenshot's client anchor no longer matches the live window.
+
+    Raised when a window is moved or resized between ``win.see()`` and a
+    screenshot-space coordinate action, so the agent is told to re-capture
+    instead of silently acting on a stale anchor (which would mis-route the
+    click and make the action-proof lie).
+    """
+
+
 def _err(operation: str) -> OSError:
     code = ctypes.get_last_error()
     detail = ctypes.FormatError(code)
@@ -85,6 +95,52 @@ def ensure_dpi_awareness() -> None:
     except (OSError, AttributeError):
         pass
     user32.SetProcessDPIAware()
+
+
+def process_dpi_awareness() -> int:
+    """Return the current process DPI awareness (0 unaware, 1 system, 2 per-
+    monitor), or -1 when it cannot be queried (pre-8.1 or a failed probe)."""
+    try:
+        shcore = ctypes.WinDLL("shcore")
+        awareness = ctypes.c_int()
+        if shcore.GetProcessDpiAwareness(None, ctypes.byref(awareness)) == 0:  # S_OK
+            return int(awareness.value)
+    except (OSError, AttributeError):
+        pass
+    return -1
+
+
+def dpi_health(awareness: int) -> dict[str, object]:
+    """Classify DPI awareness for the doctor report.
+
+    The harness needs physical-pixel coordinates so screenshots and input
+    points share one space. Only per-monitor awareness (``2``) guarantees
+    that on a scaled monitor; system-aware/unaware processes get logical
+    (virtualized) coordinates and can drift from the image geometry.
+    """
+    if awareness == 2:
+        return {
+            "awareness": "per_monitor",
+            "ok": True,
+            "note": "physical-pixel coordinates; screenshots match input",
+        }
+    if awareness == 1:
+        return {
+            "awareness": "system",
+            "ok": False,
+            "note": "virtualized logical coords; may mismatch screenshots on a scaled monitor",
+        }
+    if awareness == 0:
+        return {
+            "awareness": "unaware",
+            "ok": False,
+            "note": "logical coords; screenshots/input mismatch on a scaled monitor",
+        }
+    return {
+        "awareness": "unknown",
+        "ok": False,
+        "note": "could not query DPI awareness (probe failed or pre-8.1)",
+    }
 
 
 def is_interactive_desktop() -> bool:
@@ -152,6 +208,33 @@ def client_bounds(hwnd: int) -> tuple[int, int, int, int]:
     width = rect.right - rect.left
     height = rect.bottom - rect.top
     return point.x, point.y, max(1, width), max(1, height)
+
+
+def anchor_health(
+    frozen: dict[str, float],
+    live: tuple[float, float, float, float],
+    *,
+    moved_tol: float = 2.0,
+) -> str:
+    """Classify a saved screenshot anchor against the window's live client box.
+
+    Returns ``"ok"`` (same geometry), ``"moved"`` (translation only, size
+    unchanged), ``"resized"`` (client size changed, so the screenshot scale is
+    stale), or ``"offscreen"``. A degenerate, parked read (the documented
+    ``-32000`` iconified/foreground-handoff transient) is reported as
+    ``"offscreen"`` *not* ``"moved"``, so callers keep the frozen anchor for
+    that race rather than mistaking it for a real user move.
+    """
+    fx, fy = float(frozen["x"]), float(frozen["y"])
+    fw, fh = float(frozen["width"]), float(frozen["height"])
+    lx, ly, lw, lh = (float(value) for value in live)
+    if lw <= 0 or lh <= 0 or lx < -10000 or ly < -10000:
+        return "offscreen"
+    if abs(lw - fw) > moved_tol or abs(lh - fh) > moved_tol:
+        return "resized"
+    if abs(lx - fx) > moved_tol or abs(ly - fy) > moved_tol:
+        return "moved"
+    return "ok"
 
 
 def enumerate_windows() -> list[dict]:
@@ -519,9 +602,33 @@ def _print_window_capture(hwnd: int, width: int, height: int, *, timeout: float 
 
 
 def _print_window_capture_blocking(hwnd: int, width: int, height: int) -> Image.Image:
+    """PrintWindow the whole window, then crop out the client area.
+
+    ``PW_RENDERFULLCONTENT`` renders the *entire* window -- title bar and
+    frame included -- into the DC, so a client-sized bitmap only captured the
+    top-left corner and was anchored at the window origin. But
+    ``client_bounds`` (and therefore every screenshot -> screen conversion)
+    assumes the image's top-left is the *client* origin. Render at the
+    whole-window size and crop the client rectangle so the returned image is
+    genuinely the client area and the coordinate system stays aligned at any
+    DPI scale and non-client inset.
+    """
+    window_rect = wt.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(window_rect)):
+        raise _err("GetWindowRect")
+    whole_width = max(1, window_rect.right - window_rect.left)
+    whole_height = max(1, window_rect.bottom - window_rect.top)
+
+    # Client origin relative to the whole-window origin == non-client inset
+    # (left frame, title bar). ClientToScreen(0, 0) is the client origin.
+    origin = wt.POINT(0, 0)
+    user32.ClientToScreen(hwnd, ctypes.byref(origin))
+    offset_x = origin.x - window_rect.left
+    offset_y = origin.y - window_rect.top
+
     window_dc = user32.GetWindowDC(hwnd)
     memory_dc = gdi32.CreateCompatibleDC(window_dc)
-    bitmap = gdi32.CreateCompatibleBitmap(window_dc, width, height)
+    bitmap = gdi32.CreateCompatibleBitmap(window_dc, whole_width, whole_height)
     previous = gdi32.SelectObject(memory_dc, bitmap)
     try:
         result = user32.PrintWindow(
@@ -529,7 +636,14 @@ def _print_window_capture_blocking(hwnd: int, width: int, height: int) -> Image.
         )
         if not result:
             raise _err("PrintWindow")
-        return _bitmap_to_image(memory_dc, bitmap, width, height)
+        image = _bitmap_to_image(memory_dc, bitmap, whole_width, whole_height)
+        # Clamp to what actually exists: frameless or per-monitor-DPI quirks
+        # can push the client rect a few px past the captured region.
+        left = max(0, min(offset_x, whole_width))
+        top = max(0, min(offset_y, whole_height))
+        right = max(left + 1, min(offset_x + width, whole_width))
+        bottom = max(top + 1, min(offset_y + height, whole_height))
+        return image.crop((left, top, right, bottom))
     finally:
         gdi32.SelectObject(memory_dc, previous)
         gdi32.DeleteObject(bitmap)
