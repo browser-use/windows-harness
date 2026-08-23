@@ -168,8 +168,15 @@ def send_inputs(*inputs: tuple[int, dict]) -> None:
     array = (_INPUT * len(inputs))()
     for slot, (kind, fields) in zip(array, inputs, strict=True):
         slot.type = kind
+        # The union's members (mi/ki/hi) are promoted to _INPUT, but their
+        # sub-fields (wVk, dwFlags, dx, dy, wScan, mouseData, ...) are NOT.
+        # setattr on the outer slot silently writes a Python-only attribute,
+        # leaving the C union all zero, so SendInput sends a null event that
+        # never reaches the target (and the health probe reads 'swallowed').
+        # Write into the concrete member for the input kind instead.
+        target = slot.union.ki if kind == INPUT_KEYBOARD else slot.union.mi
         for name, value in fields.items():
-            setattr(slot, name, value)
+            setattr(target, name, value)
     sent = user32.SendInput(len(inputs), array, ctypes.sizeof(_INPUT))
     if sent != len(inputs):
         raise ForegroundError(
@@ -565,6 +572,30 @@ user32.CreateWindowExW.argtypes = (
     ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
     wt.HWND, wt.HANDLE, wt.HANDLE, wt.LPCVOID,
 )
+
+# The probe path below previously leaned on ctypes' default signatures, which
+# truncate HMODULE/HWND return values to c_int on 64-bit. GetModuleHandleW(None)
+# then returned the low 32 bits of the exe base (e.g. 0x3be00000 instead of
+# 0x7ff63be00000), so the probe registered its window class and created its
+# window under a bogus hInstance -- intermittent access violations in
+# RegisterClassExW/CreateWindowExW. Pin the full 64-bit signatures.
+kernel32.GetModuleHandleW.restype = wt.HANDLE
+kernel32.GetModuleHandleW.argtypes = (wt.LPCWSTR,)
+user32.RegisterClassExW.restype = ctypes.c_ushort  # ATOM
+user32.RegisterClassExW.argtypes = (ctypes.POINTER(_WNDCLASSEXW),)
+user32.GetFocus.restype = wt.HWND
+user32.SetFocus.restype = wt.HWND
+user32.SetFocus.argtypes = (wt.HWND,)
+user32.DestroyWindow.restype = wt.BOOL
+user32.DestroyWindow.argtypes = (wt.HWND,)
+user32.PeekMessageW.restype = wt.BOOL
+user32.PeekMessageW.argtypes = (
+    ctypes.POINTER(wt.MSG), wt.HWND, wt.UINT, wt.UINT, wt.UINT,
+)
+user32.AttachThreadInput.restype = wt.BOOL
+user32.AttachThreadInput.argtypes = (wt.DWORD, wt.DWORD, wt.BOOL)
+user32.GetWindowThreadProcessId.restype = wt.DWORD
+user32.GetWindowThreadProcessId.argtypes = (wt.HWND, ctypes.POINTER(wt.DWORD))
 
 
 def _register_probe_class() -> bool:
@@ -1465,18 +1496,36 @@ def foreground_scroll(target: int, sx: int, sy: int, delta_y: int, delta_x: int 
 
 def foreground_drag(target: int, start: tuple[float, float], end: tuple[float, float], *, button: str, steps: int, duration: float, cloak: bool, hold: bool = False) -> dict:
     down_flag, up_flag = _BUTTON_SENDINPUT[button]
-    move_flag = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE
     with cloaked_focus(target, cloak=cloak, hold=hold) as cloaked_ok:
         _confirmed_foreground(target, "drag")
         if sendinput_healthy():
+            # MOUSEEVENTF_ABSOLUTE expects dx/dy normalized to 0..65535 against
+            # the primary monitor (or the virtual screen with VIRTUALDESK).
+            # The harness works in physical screen pixels, so absolute moves
+            # would place the drag at the wrong spot once SendInput is used.
+            # Park the cursor on the start point (SetCursorPos) and drive the
+            # path with RELATIVE moves instead: correct on every monitor and
+            # no coordinate-space conversion.
+            set_cursor(start[0], start[1])
             send_inputs((INPUT_MOUSE, {"dwFlags": down_flag}))
+            current = (start[0], start[1])
             for index in range(1, max(1, steps) + 1):
                 ratio = index / max(1, steps)
-                send_inputs(
-                    (INPUT_MOUSE, {"dwFlags": move_flag, "dx": int(start[0] + (end[0] - start[0]) * ratio),
-                                   "dy": int(start[1] + (end[1] - start[1]) * ratio)})
-                )
+                target_x = start[0] + (end[0] - start[0]) * ratio
+                target_y = start[1] + (end[1] - start[1]) * ratio
+                dx = int(round(target_x - current[0]))
+                dy = int(round(target_y - current[1]))
+                if dx or dy:
+                    send_inputs((INPUT_MOUSE, {"dwFlags": MOUSEEVENTF_MOVE, "dx": dx, "dy": dy}))
+                    current = (current[0] + dx, current[1] + dy)
                 time.sleep(max(0.0, duration) / max(1, steps))
+            # If the last interpolated step landed short of `end`, close the gap.
+            dx_end = int(round(end[0] - current[0]))
+            dy_end = int(round(end[1] - current[1]))
+            if dx_end or dy_end:
+                send_inputs(
+                    (INPUT_MOUSE, {"dwFlags": MOUSEEVENTF_MOVE, "dx": dx_end, "dy": dy_end})
+                )
             send_inputs((INPUT_MOUSE, {"dwFlags": up_flag}))
             return {"mode": "foreground", "verified": True, "cloaked": cloaked_ok}
         pen_drag(int(start[0]), int(start[1]), int(end[0]), int(end[1]), steps=steps, duration=duration)
