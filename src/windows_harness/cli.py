@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import code
 import json
+import os
 import subprocess
 import sys
 from importlib import resources
@@ -60,21 +61,23 @@ def _skill_text() -> str:
 def _install_skill(target: str | None = None) -> int:
     """Write SKILL.md and agents metadata into the user's skills directory.
 
-    Prefers the open ``~/.agents/skills`` location and mirrors into
-    ``~/.codex/skills`` so both current and older Codex builds pick it up.
+    Writes the open ``~/.agents/skills`` location, then mirrors into
+    ``~/.codex/skills`` (Codex), ``~/.claude/skills`` (Claude Code), and
+    ``~/.cursor/skills`` (Cursor) so every agent discovers the skill. A custom
+    ``target`` installs only to that one directory.
     """
     skill_name = "windows-harness"
     agents_home = Path.home() / ".agents" / "skills" / skill_name
     codex_home = Path(
-        __import__("os").environ.get("CODEX_HOME", str(Path.home() / ".codex"))
+        os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
     ) / "skills" / skill_name
+    claude_home = Path.home() / ".claude" / "skills" / skill_name
+    cursor_home = Path.home() / ".cursor" / "skills" / skill_name
 
-    destinations = [codex_home]
     if target:
         destinations = [Path(target).expanduser()]
     else:
-        if agents_home != codex_home:
-            destinations.insert(0, agents_home)
+        destinations = [agents_home, codex_home, claude_home, cursor_home]
 
     files: list[tuple[str, str]] = [
         ("SKILL.md", _skill_text()),

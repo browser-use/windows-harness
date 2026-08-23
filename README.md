@@ -27,9 +27,10 @@ Paste this into Codex or Claude Code:
 
 ```text
 Install or upgrade Windows Harness from https://github.com/browser-use/windows-harness
-with uv using Python 3.12. Register the skill printed by `windows-harness skill`,
-then run `windows-harness doctor`. Finally, verify the harness by capturing one
-already-running app without bringing it to the foreground.
+with uv using Python 3.12. Register its agent skill with `windows-harness install-skill`
+(it writes into `~/.agents`, `~/.codex`, `~/.claude` and `~/.cursor`, so Codex, Claude Code
+and Cursor all discover it), then run `windows-harness doctor`. Finally, verify the harness
+by capturing one already-running app without bringing it to the foreground.
 ```
 
 That is it. The agent installs the package, teaches itself the workflow, checks
