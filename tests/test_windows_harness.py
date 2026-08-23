@@ -760,3 +760,99 @@ def test_capture_screen_returns_whole_image():
     assert shot["image"].height > 0
     assert shot["hwnd"] == 0
     assert shot["client_bounds"]["width"] == shot["image"].width
+
+
+def test_capture_shot_bring_to_front_holds_visible_foreground(monkeypatch):
+    """see(bring_to_front=True) fronts the target (cloak=False, hold=True)
+    before recapturing, so the window lands and stays in front."""
+    from contextlib import contextmanager
+
+    import windows_harness.windows as win_mod
+
+    calls: list = []
+    shot = {"image": object(), "minimized": False, "backend": "printwindow"}
+    monkeypatch.setattr(
+        win_mod.Windows, "_resolve_hwnd",
+        lambda self, app: (0x111, {"hwnd": 0x111, "pid": 1, "process": "x", "title": "x"}),
+    )
+    monkeypatch.setattr(
+        win_mod, "capture_window",
+        lambda h: calls.append("capture") or shot,
+    )
+
+    @contextmanager
+    def fake_focus(hwnd, *, cloak=True, hold=False):
+        calls.append(("focus", hwnd, cloak, hold))
+        yield True
+
+    monkeypatch.setattr(win_mod.inject, "cloaked_focus", fake_focus)
+
+    hwnd, _info, _out = win_mod.Windows()._capture_shot("Notepad", bring_to_front=True)
+    assert hwnd == 0x111
+    assert ("focus", 0x111, False, True) in calls  # visible, held until release
+    assert calls.count("capture") == 2  # grabbed once, recaptured while fronted
+
+
+def test_capture_shot_default_stays_background(monkeypatch):
+    """The default capture never fronts; a normal (non-minimized) window is
+    captured once with no cloaked-focus round at all."""
+    import windows_harness.windows as win_mod
+
+    calls: list = []
+    shot = {"image": object(), "minimized": False, "backend": "printwindow"}
+    monkeypatch.setattr(
+        win_mod.Windows, "_resolve_hwnd",
+        lambda self, app: (0x111, {"hwnd": 0x111}),
+    )
+    monkeypatch.setattr(
+        win_mod, "capture_window",
+        lambda h: calls.append("capture") or shot,
+    )
+    monkeypatch.setattr(
+        win_mod.inject, "cloaked_focus",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not front by default")),
+    )
+
+    win_mod.Windows()._capture_shot("Notepad")
+    assert calls == ["capture"]
+
+
+def test_capture_shot_minimized_default_still_cloaks(monkeypatch):
+    """The minimized-window default path is unchanged: restore under the
+    cloak, capture, then re-minimize (cloak=True, hold=False)."""
+    from contextlib import contextmanager
+
+    import windows_harness.windows as win_mod
+
+    calls: list = []
+    shot = {"image": object(), "minimized": True, "backend": "printwindow"}
+    monkeypatch.setattr(
+        win_mod.Windows, "_resolve_hwnd",
+        lambda self, app: (0x111, {"hwnd": 0x111}),
+    )
+    monkeypatch.setattr(
+        win_mod, "capture_window",
+        lambda h: calls.append("capture") or shot,
+    )
+
+    @contextmanager
+    def fake_focus(hwnd, *, cloak=True, hold=False):
+        calls.append(("focus", hwnd, cloak, hold))
+        yield True
+
+    monkeypatch.setattr(win_mod.inject, "cloaked_focus", fake_focus)
+
+    win_mod.Windows()._capture_shot("Notepad")
+    assert ("focus", 0x111, True, False) in calls  # invisible restore, no hold
+    assert calls.count("capture") == 2
+
+
+def test_cli_see_exposes_bring_to_front():
+    """`windows-harness see --bring-to-front` is wired through."""
+    from windows_harness import cli
+
+    parser = cli._build_parser()
+    args = parser.parse_args(["see", "Notepad", "--bring-to-front"])
+    assert args.bring_to_front is True
+    plain = parser.parse_args(["see", "Notepad"])
+    assert plain.bring_to_front is False

@@ -149,6 +149,11 @@ its screenshot-space coordinates pair with `coordinate_space="screen"`. A bare
 `win.see()` with no app now targets the foreground window, so it also catches a
 modal that is currently in front.
 
+`win.see(app, bring_to_front=True)` fronts the target and keeps it fronted
+(restoring it if minimized) until `win.release()`; the default is a quiet
+background grab that never raises or activates the window, so `see` stays
+non-intrusive unless you opt in.
+
 ## Text input ladder
 
 1. `win.ax.set_value()` when the element exposes a ValuePattern — verified by

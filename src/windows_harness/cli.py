@@ -142,9 +142,14 @@ def _build_parser() -> argparse.ArgumentParser:
     install.add_argument("--target", help="custom skills directory (e.g. ~/.claude/skills/windows-harness)")
     see = subparsers.add_parser("see", help="capture a bounded application window")
     see.add_argument("app")
-    see.add_argument("--max-width", type=int, default=1280)
-    see.add_argument("--max-height", type=int, default=1280)
+    see.add_argument("--max-width", type=int, default=1920)
+    see.add_argument("--max-height", type=int, default=1920)
     see.add_argument("--no-pointer", action="store_true")
+    see.add_argument(
+        "--bring-to-front",
+        action="store_true",
+        help="front the window before capturing (restore if minimized; hold until release)",
+    )
     state = subparsers.add_parser("state", help="print an application's UIA state as JSON")
     state.add_argument("app")
     state.add_argument("--screenshot", action="store_true")
@@ -187,6 +192,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_width=args.max_width,
                 max_height=args.max_height,
                 show_pointer=not args.no_pointer,
+                bring_to_front=args.bring_to_front,
             )
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return 0

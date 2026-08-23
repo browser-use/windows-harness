@@ -337,12 +337,20 @@ class Windows:
 
     # --- screenshots ---------------------------------------------------------
 
-    def _capture_shot(self, app: str | None) -> tuple[int, dict[str, Any], dict[str, Any]]:
+    def _capture_shot(
+        self, app: str | None, *, bring_to_front: bool = False
+    ) -> tuple[int, dict[str, Any], dict[str, Any]]:
         """Capture one window with the image still in memory — no disk round
         trip; the caller encodes once, at its final size."""
         hwnd, info = self._resolve_hwnd(app)
         shot = capture_window(hwnd)
-        if shot["minimized"]:
+        if bring_to_front:
+            # Explicit front: restore a minimized target, bring it to the
+            # foreground, and keep it fronted until release() so the caller
+            # can follow up with foreground-delivery input.
+            with inject.cloaked_focus(hwnd, cloak=False, hold=True) as _cloaked:
+                shot = capture_window(hwnd)
+        elif shot["minimized"]:
             # PrintWindow renders the iconic sliver for minimized windows;
             # restore invisibly under the cloak, capture, then re-minimize.
             with inject.cloaked_focus(hwnd, cloak=True) as _cloaked:
@@ -521,14 +529,22 @@ class Windows:
         app: str | None = None,
         *,
         path: str | Path | None = None,
-        max_width: int = 1280,
-        max_height: int = 1280,
+        max_width: int = 1920,
+        max_height: int = 1920,
         show_pointer: bool = True,
+        bring_to_front: bool = False,
     ) -> dict[str, Any]:
-        """Capture a bounded window image and draw the harness pointer onto it."""
+        """Capture a bounded window image and draw the harness pointer onto it.
+
+        ``bring_to_front=True`` fronts the target and keeps it fronted
+        (restoring it if minimized) until :meth:`release`; the default is a
+        quiet background grab that never activates or raises the window. The
+        image is bounded by ``max_width`` x ``max_height`` (default 1920),
+        downscaling only when the window is larger than that cap.
+        """
         if max_width <= 0 or max_height <= 0:
             raise HarnessError("max_width and max_height must be positive")
-        hwnd, info, shot = self._capture_shot(app)
+        hwnd, info, shot = self._capture_shot(app, bring_to_front=bring_to_front)
         image = shot.pop("image")  # the capturer always hands back RGB pixels
         raw_size = (image.width, image.height)
 
