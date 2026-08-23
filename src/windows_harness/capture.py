@@ -232,6 +232,74 @@ def _no_match_error(query: str, windows: list[dict]) -> str:
     return f"No matching window for {query!r}{suffix}"
 
 
+_TH32CS_SNAPPROCESS = 0x00000002
+
+
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wt.DWORD),
+        ("cntUsage", wt.DWORD),
+        ("th32ProcessID", wt.DWORD),
+        ("th32DefaultHeapID", ctypes.c_void_p),
+        ("th32ModuleID", wt.DWORD),
+        ("cntThreads", wt.DWORD),
+        ("th32ParentProcessID", wt.DWORD),
+        ("pcPriClassBase", wt.LONG),
+        ("dwFlags", wt.DWORD),
+        ("szExeFile", wt.WCHAR * 260),
+    ]
+
+
+# Typed Win32 Toolhelp signatures so 64-bit handles are not truncated by the
+# default c_int return of an untyped WinDLL call.
+kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+kernel32.CreateToolhelp32Snapshot.argtypes = [wt.DWORD, wt.DWORD]
+kernel32.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_PROCESSENTRY32W)]
+kernel32.Process32FirstW.restype = wt.BOOL
+kernel32.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_PROCESSENTRY32W)]
+kernel32.Process32NextW.restype = wt.BOOL
+kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+kernel32.CloseHandle.restype = wt.BOOL
+
+
+def _process_tree() -> dict[int, int]:
+    """Map every live process id to its parent process id (Win32 Toolhelp)."""
+    snapshot = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        return {}
+    entry = _PROCESSENTRY32W()
+    entry.dwSize = ctypes.sizeof(entry)
+    tree: dict[int, int] = {}
+    try:
+        if kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+            while True:
+                tree[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+                if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                    break
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return tree
+
+
+def _is_child_of_windowed_process(
+    pid: int, *, window_pids: set[int], tree: dict[int, int]
+) -> bool:
+    """True when ``pid`` descends from a process that owns a ``window_pids`` window.
+
+    An embedded web renderer (WebView2/CEF/Electron/QtWebEngine) is always a
+    child process of the host app, so this separates a renderer's window from
+    the app's own window without hardcoding any process or technology name.
+    """
+    cur = tree.get(pid)
+    seen: set[int] = set()
+    while cur is not None and cur != 0 and cur not in seen:
+        if cur in window_pids:
+            return True
+        seen.add(cur)
+        cur = tree.get(cur)
+    return False
+
+
 def resolve_hwnd(query: str) -> tuple[int, dict]:
     """Resolve a PID, exe name, path fragment, or window title to one window.
 
@@ -264,7 +332,49 @@ def resolve_hwnd(query: str) -> tuple[int, dict]:
         ):
             tiers[4].append(window)
 
-    for tier in tiers:
+    # For title/fuzzy tiers an embedded web renderer (WebView2/CEF/Electron/
+    # QtWebEngine) often owns a window that shares the host app's title. Such a
+    # renderer is always a *child* process of the host, so detect it by process
+    # ancestry instead of hardcoding a process name: any window whose process
+    # descends from another process that also owns a query-matching window is
+    # the embedded renderer, not the app.
+    query_windows = [window for tier in tiers for window in tier]
+    process_tree = _process_tree()
+    query_window_pids = {window["pid"] for window in query_windows}
+    child_pids = {
+        window["pid"]
+        for window in query_windows
+        if _is_child_of_windowed_process(
+            window["pid"], window_pids=query_window_pids, tree=process_tree
+        )
+    }
+
+    def area(window: dict) -> int:
+        left, top, right, bottom = window["bounds"]
+        return (right - left) * (bottom - top)
+
+    def on_screen_rank(window: dict) -> int:
+        if window["visible"] and not window["cloaked"] and not window["minimized"]:
+            return 0
+        if window["visible"] and not window["cloaked"]:
+            return 1
+        if window["cloaked"]:
+            return 2
+        return 3
+
+    def pick(matches: list[dict]) -> dict:
+        return min(
+            matches,
+            key=lambda window: (
+                not window["title"],
+                on_screen_rank(window),
+                window["minimized"],
+                -area(window),
+            ),
+        )
+
+    best_renderer: dict | None = None
+    for tier_index, tier in enumerate(tiers):
         matches = [window for window in tier if window["bounds"]]
         # Drop hook/IME junk that merely mentions the query in its title, and
         # any window too small to interact with (macOS filters < 40 px too).
@@ -283,25 +393,36 @@ def resolve_hwnd(query: str) -> tuple[int, dict]:
         if not matches:
             continue
 
-        def area(window: dict) -> int:
-            left, top, right, bottom = window["bounds"]
-            return (right - left) * (bottom - top)
-
         # Never prefer an untitled window: helper hosts (crashpad watchers,
         # DDE servers) are top-level and visible but are never the
-        # interaction target. And never prefer a minimized window over a
-        # shown one: iconic windows report IsWindowVisible() == True but
-        # their bounds are the parked (-32000) rect.
-        best = min(
-            matches,
-            key=lambda window: (
-                not window["title"],
-                window["minimized"],
-                not (window["visible"] and not window["cloaked"]),
-                -area(window),
-            ),
+        # interaction target. Among titled windows, prefer the one that is
+        # actually on the desktop, then a visible-but-parked (minimized) main
+        # window, and only then any clocked/hidden helper. A hidden helper can
+        # be big and non-minimized while the real main window is parked as a
+        # minimized taskbar entry (IsWindowVisible() True, bounds at the
+        # -32000 rect), so "non-minimized" must not outrank "visible".
+        # Apply the same preference against embedded web renderers: exclude
+        # child (renderer) windows from title/fuzzy tiers so a real app window
+        # wins, and only fall back to the renderer when no app window matched
+        # in any tier. An explicit hwnd/pid (tier 0) or exact process name
+        # (tier 1) is honoured as-is: naming a renderer returns that renderer.
+        de_priority = tier_index >= 2
+        primary = (
+            [w for w in matches if w["pid"] not in child_pids]
+            if de_priority
+            else matches
         )
-        return best["hwnd"], best
+        if primary:
+            best = pick(primary)
+            return best["hwnd"], best
+        # This tier matched only renderer windows: remember the best of them
+        # as a fallback, but keep scanning lower tiers for an app window.
+        candidate = pick(matches)
+        if best_renderer is None or area(candidate) > area(best_renderer):
+            best_renderer = candidate
+
+    if best_renderer is not None:
+        return best_renderer["hwnd"], best_renderer
 
     raise HarnessError(_no_match_error(query, all_windows))
 
@@ -465,7 +586,7 @@ def capture_window(hwnd: int) -> dict:
         image = _screen_capture_region(x, y, width, height)
         fallback_used = True
     else:
-        if _looks_black(image) and visible_on_screen:
+        if _looks_blank(image) and visible_on_screen:
             image = _screen_capture_region(x, y, width, height)
             fallback_used = True
 
@@ -480,11 +601,22 @@ def capture_window(hwnd: int) -> dict:
     }
 
 
-def _looks_black(image: Image.Image) -> bool:
+def _looks_blank(image: Image.Image) -> bool:
+    """True when the frame is a solid wash of black or white.
+
+    A composited/DWM window that PrintWindow cannot read often succeeds
+    without error and paints its own DC background — frequently pure white
+    (Tencent Video) or pure black (WebView2) instead of raising. That wash is
+    just as "no content" as an all-black frame, so it must trigger the
+    screen-region fallback too; otherwise a blank white screenshot is returned
+    as a "successful" capture.
+    """
     grey = image.convert("L")
     histogram = grey.histogram()
+    total = float(grey.width * grey.height)
     dark_pixels = sum(histogram[:16])
-    return dark_pixels / float(grey.width * grey.height) > 0.995
+    bright_pixels = sum(histogram[240:])
+    return max(dark_pixels, bright_pixels) / total > 0.995
 
 
 def png_size(path: Path) -> tuple[int, int]:
