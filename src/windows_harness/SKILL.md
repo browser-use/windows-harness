@@ -129,6 +129,26 @@ only animates the virtual pointer and delivers no input. Hover is
 coordinate-routed — the target needs to be unoccluded, not foreground — and
 the cursor stays put so the tooltip survives long enough for a `win.see()`.
 
+## Modal dialogs and overlays
+
+`win.see(app)` is **window-scoped**: it captures only that one window's client
+area, so an overlay sitting on top (a Save As / Open / Print dialog, a
+confirm prompt) is **not** in the shot even though it is on screen. To see a
+popup that just appeared, do not guess its title:
+
+```python
+win.key("ctrl+s", app="Notepad")        # an untitled doc opens Save As
+fg = win.foreground_window()            # the dialog's title/hwnd
+frame = win.see(fg["hwnd"])             # capture the dialog itself
+# or grab the whole desktop, which sees every window at once:
+desktop = win.capture_screen()
+```
+
+`win.capture_screen()` captures the entire virtual desktop (all monitors) and
+its screenshot-space coordinates pair with `coordinate_space="screen"`. A bare
+`win.see()` with no app now targets the foreground window, so it also catches a
+modal that is currently in front.
+
 ## Text input ladder
 
 1. `win.ax.set_value()` when the element exposes a ValuePattern — verified by
@@ -144,6 +164,13 @@ the cursor stays put so the tooltip survives long enough for a `win.see()`.
 5. When `doctor` reports `input_health.sendinput == "swallowed"`, tell the
    user which processes (`possible_injectors`) are eating injected input —
    removing the hook software is the real fix.
+
+`win.type()` reports what actually landed, not just that keystrokes were sent.
+XAML/WinUI text boxes (Win11 Notepad, Settings) and CEF editors drop much of a
+`KEYEVENTF_UNICODE` burst while claiming `verified: True`; the harness reads
+the field back and, on a mismatch, retries via `win.ax.set_value()` (verified)
+or `win.paste()`. If the result carries `"retried_via"`, the keyboard route
+dropped characters and the retry landed them.
 
 Replacing a field's existing text: there is no reliable select-all keystroke
 on hook-filtered machines (Ctrl+A is a combo and refuses; CEF ignores a

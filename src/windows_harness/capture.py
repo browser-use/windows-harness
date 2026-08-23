@@ -566,6 +566,47 @@ _HUNG_CAPTURE_THREADS: list[threading.Thread] = []
 _MAX_HUNG_CAPTURES = 2
 
 
+def virtual_screen_bounds() -> tuple[int, int, int, int]:
+    """The whole virtual desktop (all monitors) as ``(left, top, width, height)``.
+
+    Matches the ``SM_XVIRTUALSCREEN`` family of metrics the harness already
+    uses for :func:`point_on_screen`, so a full-screen capture and a
+    ``coordinate_space="screen"`` input share one physical-pixel space even
+    on a multi-monitor arrangement with a negative-origin secondary display.
+    """
+    SM_XVIRTUALSCREEN = 76
+    SM_YVIRTUALSCREEN = 77
+    SM_CXVIRTUALSCREEN = 78
+    SM_CYVIRTUALSCREEN = 79
+    left = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+    top = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+    width = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+    height = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+    return left, top, max(1, width), max(1, height)
+
+
+def capture_screen() -> dict:
+    """Capture the entire virtual desktop as one image.
+
+    Unlike :func:`capture_window`, this is not bound to a single hwnd, so it
+    sees every window and any modal overlay (Save As / Open / Print dialogs)
+    that a window-scoped screenshot would miss. Returns the same metadata
+    shape as :func:`capture_window` with ``hwnd`` of 0 and the virtual-desktop
+    bounds as the client region.
+    """
+    left, top, width, height = virtual_screen_bounds()
+    image = _screen_capture_region(left, top, width, height)
+    return {
+        "image": image,
+        "hwnd": 0,
+        "client_bounds": {"x": left, "y": top, "width": width, "height": height},
+        "scale_x": 1.0,
+        "scale_y": 1.0,
+        "backend": "bitblt",
+        "minimized": False,
+    }
+
+
 def _print_window_capture(hwnd: int, width: int, height: int, *, timeout: float = 4.0) -> Image.Image:
     """PrintWindow on a daemon thread: a hung window must not hang the agent.
 

@@ -10,11 +10,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from windows_harness.capture import (  # noqa: E402
     HarnessError,
     anchor_health,
+    capture_screen,
     capture_window,
     dpi_health,
     enumerate_windows,
     is_interactive_desktop,
     resolve_hwnd,
+    virtual_screen_bounds,
 )
 from windows_harness.delivery import (  # noqa: E402
     post_message_blocked_by_uipi,
@@ -25,8 +27,13 @@ from windows_harness.inject import (  # noqa: E402
     parse_combo,
     pack_lparam,
     vk_for_key,
+    zip_strict,
 )
 from windows_harness.pointer import POINTER_HOTSPOT, pointer_points  # noqa: E402
+from windows_harness.windows import (  # noqa: E402
+    _text_landed,
+    _normalize_newlines,
+)
 
 
 def test_anchor_health_classifies_window_movement():
@@ -231,6 +238,40 @@ def test_ax_get_value_falls_back_to_patterns():
     assert Accessibility(Host()).get(0, "Value") == "read through the pattern"
     with pytest.raises(HarnessError):
         Accessibility(Host()).get(1, "Value")  # unknown index stays honest
+
+
+def test_ax_set_value_tolerates_newline_normalization():
+    """SetValue's verify-after-write must not false-fail on CRLF/CR vs LF."""
+    from windows_harness.controls import Accessibility
+
+    class FakePattern:
+        def __init__(self):
+            self.Value = ""
+
+        def SetValue(self, value):
+            # A Windows edit control normalises LF to CRLF on read-back.
+            self.Value = value.replace("\n", "\r\n")
+
+    class FakeElement:
+        def __init__(self):
+            self._pattern = FakePattern()
+
+        def GetValuePattern(self):
+            return self._pattern
+
+    class Host:
+        def _element(self, index):
+            try:
+                return self._elements[index]
+            except KeyError as exc:
+                raise HarnessError(f"Unknown element index {index!r}") from exc
+
+    element = FakeElement()
+    host = Host()
+    host._elements = {0: element}
+    # No exception means the CRLF round-trip was accepted as an exact match.
+    Accessibility(host).set_value(0, "line1\nline2")
+    assert element._pattern.Value == "line1\r\nline2"
 
 
 def test_vk_for_key_rejects_non_ascii():
@@ -669,3 +710,53 @@ def test_action_label_helpers():
     assert _click_label("left", 2) == "2x left click"
     assert _scroll_label(360, 0) == "scroll up dy=360 dx=0"
     assert _scroll_label(-120, 120) == "scroll down/right dy=-120 dx=120"
+
+
+def test_zip_strict_matches_zip_strict_semantics():
+    """zip_strict yields paired items and rejects unequal lengths on Py3.9+."""
+    assert list(zip_strict([1, 2], ["a", "b"])) == [(1, "a"), (2, "b")]
+    assert list(zip_strict([1, 2, 3], [4, 5, 6])) == [(1, 4), (2, 5), (3, 6)]
+    with pytest.raises(ValueError):
+        list(zip_strict([1, 2], ["a"]))
+    with pytest.raises(ValueError):
+        list(zip_strict([1], ["a", "b"]))
+
+
+def test_text_landed_detects_dropped_chars():
+    """_text_landed confirms append-at-end, flags shorter-than-typed drops, and
+    leaves mid-document content ambiguous (None) rather than guessing."""
+    typed = "hello world"
+    # Fresh/replaced field: the typed text is at the end -> landed.
+    assert _text_landed("prefix\nhello world", typed) is True
+    assert _text_landed("hello world", typed) is True
+    # A drop leaves the field shorter than what we typed -> not landed.
+    assert _text_landed("hel", typed) is False
+    # Text present mid-document (e.g. we typed into the middle) -> ambiguous.
+    assert _text_landed("hello world then more", typed) is None
+    # No read-back available -> nothing to compare.
+    assert _text_landed(None, typed) is None
+    # Empty typed text is trivially landed.
+    assert _text_landed("anything", "") is True
+
+
+def test_normalize_newlines_collapses_crlf():
+    assert _normalize_newlines("a\r\nb\rc") == "a\nb\nc"
+    assert _normalize_newlines("plain") == "plain"
+
+
+@pytest.mark.skipif(not is_interactive_desktop(), reason="no interactive desktop")
+def test_virtual_screen_bounds_positive():
+    """The virtual desktop bounds are positive on an interactive desktop."""
+    left, top, width, height = virtual_screen_bounds()
+    assert width > 0
+    assert height > 0
+
+
+@pytest.mark.skipif(not is_interactive_desktop(), reason="no interactive desktop")
+def test_capture_screen_returns_whole_image():
+    """capture_screen returns a full-image dict with virtual-desktop bounds."""
+    shot = capture_screen()
+    assert shot["image"].width > 0
+    assert shot["image"].height > 0
+    assert shot["hwnd"] == 0
+    assert shot["client_bounds"]["width"] == shot["image"].width

@@ -167,7 +167,7 @@ class _INPUT(ctypes.Structure):
 def send_inputs(*inputs: tuple[int, dict]) -> None:
     """Inject through the system input queue; verify the full batch landed."""
     array = (_INPUT * len(inputs))()
-    for slot, (kind, fields) in zip(array, inputs, strict=True):
+    for slot, (kind, fields) in zip_strict(array, inputs):
         slot.type = kind
         # The union's members (mi/ki/hi) are promoted to _INPUT, but their
         # sub-fields (wVk, dwFlags, dx, dy, wScan, mouseData, ...) are NOT.
@@ -363,6 +363,40 @@ def get_cursor() -> tuple[int, int]:
 
 def current_foreground() -> int:
     return user32.GetForegroundWindow() or 0
+
+
+def foreground_root_hwnd() -> int:
+    """The top-level (root) window that owns the foreground, or 0.
+
+    ``GetForegroundWindow`` returns the foreground HWND, which is often a
+    child/editor control. ``GetAncestor(GA_ROOT)`` walks up to the window
+    the taskbar/title belongs to so ``see()`` with no app targets the real
+    frame a modal dialog (Save As / Open / Print) sits on top of.
+    """
+    hwnd = current_foreground()
+    if not hwnd:
+        return 0
+    root = user32.GetAncestor(wt.HWND(hwnd), GA_ROOT) or hwnd
+    return int(root)
+
+
+def zip_strict(*iterables):
+    """``zip`` that refuses unequal lengths, matching Python 3.10+ semantics.
+
+    The project targets Python 3.10+ where ``zip(..., strict=True)`` exists,
+    but the bundled CLI can run against an older interpreter; keeping the
+    strict length check here preserves the "no silent truncation" guarantee
+    on every runtime instead of silently dropping the tail of a batch.
+    """
+    sentinel = object()
+    iterators = [iter(iterable) for iterable in iterables]
+    while True:
+        items = [next(it, sentinel) for it in iterators]
+        if items[0] is sentinel and all(item is sentinel for item in items):
+            return
+        if any(item is sentinel for item in items):
+            raise ValueError("zip_strict() arguments have different lengths")
+        yield tuple(items)
 
 
 def point_on_screen(x: float, y: float) -> bool:

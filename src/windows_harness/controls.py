@@ -235,7 +235,12 @@ class Accessibility:
             text = str(value)
             pattern.SetValue(text)
             # Verify-after-write: SetValue can be accepted and silently ignored.
-            if str(pattern.Value or "") != text:
+            # Windows controls normalise newlines (CRLF/CR vs LF); compare after
+            # collapsing line endings so a multi-line value does not false-fail.
+            def _norm(value: str) -> str:
+                return value.replace("\r\n", "\n").replace("\r", "\n")
+
+            if _norm(str(pattern.Value or "")) != _norm(text):
                 raise HarnessError(
                     f"SetValue on element {element_index} did not take effect"
                 )

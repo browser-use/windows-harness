@@ -28,6 +28,7 @@ from .capture import (
     HarnessError,
     StaleWindowError,
     anchor_health,
+    capture_screen,
     capture_window,
     client_bounds,
     dpi_health,
@@ -37,12 +38,15 @@ from .capture import (
     process_dpi_awareness,
     process_image_name,
     resolve_hwnd,
+    virtual_screen_bounds,
     windows_for_process,
 )
 from .controls import Accessibility
 from .inject import (
+    zip_strict,
     current_foreground,
     force_foreground,
+    foreground_root_hwnd,
     point_on_screen,
 )
 from .overlay import LivePointerOverlay
@@ -103,6 +107,35 @@ def _scroll_label(delta_y: int, delta_x: int) -> str:
         parts.append("right" if delta_x > 0 else "left")
     direction = "/".join(parts) or "scroll"
     return f"scroll {direction} dy={delta_y} dx={delta_x}"
+
+
+def _normalize_newlines(value: str) -> str:
+    """Collapse CRLF/CR to LF so read-back compares against typed ``\\n``."""
+    return value.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _text_landed(read_back: str | None, typed: str) -> bool | None:
+    """Did the typed text make it to the end of the read-back value?
+
+    Returns ``None`` when there is nothing to compare (read-back unavailable)
+    or the result is ambiguous (text present mid-document), ``True`` when the
+    typed text lands at the end (fresh/replaced field), and ``False`` when the
+    field is *shorter* than what was typed -- the signature of a text box that
+    dropped injected characters (XAML/CEF editors).
+    """
+    if read_back is None:
+        return None
+    needle = _normalize_newlines(typed).rstrip()
+    haystack = _normalize_newlines(read_back).rstrip()
+    if not needle:
+        return True
+    if haystack == needle or haystack.endswith(needle):
+        return True
+    if len(haystack) < len(needle):
+        return False
+    # Mid-document or unrelated content: do not guess, only a shorter-than-
+    # typed field proves an injection drop.
+    return None
 
 class Windows:
     """Low-level Windows observation and control for one persistent process."""
@@ -194,6 +227,13 @@ class Windows:
     def _resolve_hwnd(self, query: str | None) -> tuple[int, dict[str, Any]]:
         if not query and self._last_window:
             query = str(self._last_window["hwnd"])
+        if not query:
+            # No app named and no prior see(): target the foreground window, so
+            # a bare ``see()`` grabs the modal overlay that just appeared (e.g.
+            # a Save As dialog) instead of raising "Specify an app name".
+            root = foreground_root_hwnd()
+            if root:
+                query = str(root)
         if not query:
             raise HarnessError("Specify an app name, exe name, title, or HWND")
         hwnd, window = resolve_hwnd(str(query))
@@ -403,6 +443,51 @@ class Windows:
             # The proof is best-effort: a capture/encode failure must never
             # turn a successful coordinate action into a reported failure.
             return None
+
+    def capture_screen(self, *, path: str | Path | None = None) -> dict[str, Any]:
+        """Capture the entire virtual desktop (saved to a PNG, path returned).
+
+        Unlike :meth:`see` (which is window-scoped and therefore misses a
+        modal overlay sitting on top), this sees every window including Save
+        As / Open / Print dialogs. Screenshot-space coordinates match the
+        physical pixels of the virtual desktop, so they pair with
+        ``coordinate_space="screen"``.
+        """
+        shot = capture_screen()
+        image = shot.pop("image")
+        output = self._save_shot(image, path)
+        bounds = shot["client_bounds"]
+        self._last_screenshot = {
+            "path": str(output),
+            "app": {"hwnd": 0, "pid": 0, "process": "<screen>", "title": "desktop"},
+            "hwnd": 0,
+            "width": image.width,
+            "height": image.height,
+            "raw_width": image.width,
+            "raw_height": image.height,
+            "client_bounds": bounds,
+            "scale_x": shot["scale_x"],
+            "scale_y": shot["scale_y"],
+            "backend": shot["backend"],
+            "minimized": False,
+        }
+        self._last_window = None
+        return self._last_screenshot
+
+    def foreground_window(self) -> dict[str, Any]:
+        """Describe the top-level window currently holding the foreground.
+
+        The catch-all for a modal dialog that just appeared: instead of
+        guessing its title, read the foreground root and either act on it
+        directly or pass its hwnd to ``see``/``key``/``click``.
+        """
+        # Resolve the live foreground root, not the last anchored window: a
+        # modal dialog is foreground and must win over a prior see() target.
+        root = foreground_root_hwnd()
+        if not root:
+            raise HarnessError("No foreground window")
+        hwnd, info = self._resolve_hwnd(str(root))
+        return {"hwnd": hwnd, **info}
 
     def capture_screenshot(
         self,
@@ -815,6 +900,37 @@ class Windows:
                                 delivery_mode=delivery, hold=hold)
             time.sleep(0.12)  # let the field's focus handlers settle
         result = inject.type_text(hwnd, text, delivery_mode=delivery, hold=hold)
+        if result.get("verified") and delivery == "foreground":
+            # XAML/CEF editors accept the keystrokes but silently drop many of
+            # them; confirm the text actually landed instead of trusting the
+            # transport. On a mismatch, retry through the verified UIA
+            # ValuePattern path (set_value), then clipboard paste.
+            read_back, element_index = self._read_back_text(hwnd)
+            landed = _text_landed(read_back, text)
+            if landed is False and element_index is not None:
+                try:
+                    self.ax.set_value(element_index, text)
+                    retried_via = "set_value"
+                except HarnessError:
+                    inject.set_clipboard_text(text)
+                    inject.paste_text(hwnd, delivery_mode="foreground", hold=hold)
+                    retried_via = "paste"
+                read_back, element_index = self._read_back_text(hwnd)
+                landed = _text_landed(read_back, text)
+                result["retried_via"] = retried_via
+                result["verified"] = landed is True
+                result["read_back"] = _normalize_newlines(read_back) if read_back else None
+                hint = (
+                    "foreground type did not appear in the field (XAML/CEF text "
+                    "boxes drop injected unicode)"
+                )
+                if landed is True:
+                    result["note"] = f"{hint}; retried via {retried_via} and it landed."
+                else:
+                    result["note"] = (
+                        f"{hint}; retried via {retried_via} and it still did not "
+                        "land. Use win.ax.set_value() directly."
+                    )
         result["focus"] = self._focus_outcome(focus_before, "typing", delivery=delivery, hold=hold)
         if focus_point is not None:
             proof = self._annotate_proof(
@@ -831,6 +947,59 @@ class Windows:
         result = inject.press_key(hwnd, key, delivery_mode=delivery, hold=hold)
         result["focus"] = self._focus_outcome(focus_before, f"key {key!r}", delivery=delivery, hold=hold)
         return result
+
+    def _read_back_text(self, hwnd: int) -> tuple[str | None, int | None]:
+        """Best-effort read-back of the window's editable text via UIA.
+
+        XAML/WinUI text boxes and CEF editors drop ``KEYEVENTF_UNICODE``
+        injection while still reporting ``verified: True``, so after a
+        foreground :meth:`type` we confirm against what the window actually
+        holds. Returns ``(value, element_index)`` -- the element index lets
+        the caller retry through ``ax.set_value`` (the verified UIA path) when
+        the keyboard route was dropped. ``(None, None)`` means the window
+        exposes no readable *editable* value and the transport's verdict
+        stands, honestly unverifiable.
+
+        Hosts like Word put a WebView/ribbon in the UIA tree whose value is a
+        URL, never the document text; those are skipped so the retry only ever
+        fires against a control that could actually hold the typed text.
+        """
+        # Control classes whose Value is navigational (a URL / the browser
+        # chrome), never the field the agent is typing into.
+        _SKIP_VALUE_CLASSES = ("webview", "hubwebview", "contentswebview")
+        _URL_PREFIXES = ("http://", "https://", "file://", "about:")
+        # Ribbon/toolbar controls whose Value is formatting state, never the
+        # text the agent is typing (Word's 字号/字体 boxes, search boxes, and
+        # "Page N content" placeholders). Reading these and finding the typed
+        # text in them triggers a spurious retry and a false "did not land".
+        _SKIP_VALUE_NAMES = ("字号", "字体", "Microsoft 搜索", "搜索", "页面")
+        try:
+            for control_type in ("Document", "Edit"):
+                controls = self.ax.query(
+                    app=str(hwnd), control_type=control_type, limit=5
+                )
+                for control in controls:
+                    index = control["element_index"]
+                    class_name = (control.get("class_name") or "").casefold()
+                    if any(skip in class_name for skip in _SKIP_VALUE_CLASSES):
+                        continue
+                    control_name = control.get("name") or ""
+                    if any(skip in control_name for skip in _SKIP_VALUE_NAMES):
+                        continue
+                    try:
+                        value = self.ax.get(index, "Value")
+                    except HarnessError:
+                        continue
+                    if isinstance(value, str) and value:
+                        # Skip navigational chrome even when the class hints
+                        # nothing (Word's task-pane WebView has class None but
+                        # its Value is a https URL / a registry key).
+                        if value.casefold().startswith(_URL_PREFIXES):
+                            continue
+                        return value, index
+        except HarnessError:
+            pass
+        return None, None
 
     def paste(self, text: str, *, app: str | None = None, delivery: str = "foreground", hold: bool = True) -> dict[str, Any]:
         """Set the clipboard to `text` and paste it into the target.
@@ -889,7 +1058,7 @@ class Windows:
         while True:
             time.sleep(max(0.02, interval))
             after = self._fingerprint(hwnd)
-            differ = sum(a != b for a, b in zip(before, after, strict=True))
+            differ = sum(a != b for a, b in zip_strict(before, after))
             changed = differ / float(len(before)) > max(0.0, sensitivity)
             elapsed = time.monotonic() - started
             if changed or time.monotonic() >= deadline:
