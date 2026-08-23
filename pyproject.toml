@@ -37,6 +37,12 @@ Homepage = "https://github.com/browser-use/windows-harness"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/windows_harness"]
+# Always ship the agent skill; the CLI reads these via importlib.resources, so a
+# wheel without them silently breaks `skill` / `install-skill`.
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/windows_harness/SKILL.md" = "windows_harness/SKILL.md"
+"src/windows_harness/agents/openai.yaml" = "windows_harness/agents/openai.yaml"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

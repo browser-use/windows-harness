@@ -1,4 +1,0 @@
-﻿interface:
-  display_name: "Windows Harness"
-  short_description: "Simple visual control for the whole PC"
-  default_prompt: "Use $windows-harness to see and control my PC without moving my physical cursor or taking focus."

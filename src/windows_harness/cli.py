@@ -46,11 +46,15 @@ def _tame_stdio() -> None:
 
 
 def _skill_text() -> str:
+    """Return the bundled SKILL.md (single source of truth; ships in the wheel)."""
     bundled = resources.files("windows_harness").joinpath("SKILL.md")
-    if bundled.is_file():
-        return bundled.read_text(encoding="utf-8")
-    checkout = Path(__file__).resolve().parents[2] / "skills/windows-harness/SKILL.md"
-    return checkout.read_text(encoding="utf-8")
+    if not bundled.is_file():
+        raise FileNotFoundError(
+            "Bundled SKILL.md resource is missing; the windows-harness package is "
+            "broken. Reinstall with `uv tool install --reinstall windows-harness` "
+            "or `pip install --force-reinstall windows-harness`."
+        )
+    return bundled.read_text(encoding="utf-8")
 
 
 def _install_skill(target: str | None = None) -> int:
@@ -86,14 +90,15 @@ def _install_skill(target: str | None = None) -> int:
 
 
 def _agent_meta_text() -> str:
+    """Return the bundled agents/openai.yaml (ships in the wheel)."""
     bundled = resources.files("windows_harness").joinpath("agents/openai.yaml")
-    if bundled.is_file():
-        return bundled.read_text(encoding="utf-8")
-    checkout = (
-        Path(__file__).resolve().parents[2]
-        / "skills/windows-harness/agents/openai.yaml"
-    )
-    return checkout.read_text(encoding="utf-8")
+    if not bundled.is_file():
+        raise FileNotFoundError(
+            "Bundled agents/openai.yaml resource is missing; the windows-harness "
+            "package is broken. Reinstall with `uv tool install --reinstall "
+            "windows-harness` or `pip install --force-reinstall windows-harness`."
+        )
+    return bundled.read_text(encoding="utf-8")
 
 
 def _build_parser() -> argparse.ArgumentParser:
