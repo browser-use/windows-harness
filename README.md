@@ -1,3 +1,5 @@
+<img src="https://raw.githubusercontent.com/browser-use/windows-harness/main/static/banner-ink.svg" alt="Windows Harness" width="100%" />
+
 # Windows Harness
 
 The simplest, thinnest harness that gives an LLM complete freedom to complete
