@@ -382,10 +382,6 @@ def test_normalized_coordinates_map_over_client_bounds(monkeypatch):
         "scale_y": 1.0,
         "client_bounds": {"x": 100, "y": 200, "width": 800, "height": 600},
     }
-    monkeypatch.setattr(
-        windows_module, "client_to_screen",
-        lambda hwnd, x, y: (100 + x, 200 + y),
-    )
     assert win._screen_point(0, 0, "normalized") == (100.0, 200.0)
     assert win._screen_point(1000, 1000, "normalized") == (900.0, 800.0)
     assert win._screen_point(500, 250, "normalized") == (500.0, 350.0)

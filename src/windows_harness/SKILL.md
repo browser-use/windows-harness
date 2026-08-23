@@ -180,9 +180,9 @@ Every positional primitive (`click`, `double/right click`, `drag`, `scroll`
 with x/y, `type` with x/y, `hover`) accepts `coordinate_space`; the
 normalized grid works for all of them.
 
-When semantic identity matters, prefer element centers from the ax tree
-over vision-estimated pixels — they survive layout shifts and need no
-scaling at all. ax output reports frames in the pixel space of your latest
+Default to vision + normalized coordinates; only fall back to element centers
+from the ax tree when you need semantic identity or a layout shift makes a
+coordinate fragile. ax output reports frames in the pixel space of your latest
 `win.see()` screenshot of that window (the `frame` key, alongside
 `"frame_space": "screenshot"` in `state`), so they drop straight into the
 default coordinate space. Without a matching screenshot the raw physical
@@ -210,19 +210,28 @@ query.
 
 ## Choose the lowest useful mode
 
+Vision-first: if you can read a screenshot, lead with `win.see(app)` +
+normalized coordinates (a 0..1000 grid) instead of the UIA tree. Many apps
+(Electron/custom-drawn UI, game launchers, some frameless and webview
+windows) expose no usable UIA tree, and even when they do, screenshot +
+coordinates need no per-app support. Reach for `win.ax` only when you need
+semantic identity or state.
+
 1. Use `win.script()` for a known exact command (Get-Process, registry reads).
-2. Otherwise use `win.see(app)` and vision.
+2. Otherwise use `win.see(app)` and vision: locate the target in the
+   screenshot, then act with `coordinate_space="normalized"` (0..1000) so the
+   numbers are resolution/DPI independent.
 3. Prefer a known keyboard route; use a verified coordinate for a visible,
    low-risk target.
 4. Use targeted `win.ax` only when semantic identity or state matters. For
    CEF/Electron custom-drawn UI (chat apps, music players, game launchers)
    the tree fills lazily: `state`/`ax.query`/`ax.at` automatically warm a
    near-empty CEF tree with a brief (usually invisible, cloaked) foreground
-   round, so give ax one chance before falling back to pixels. Icon-only
+   round, so warm it once if you truly need a semantic handle. Icon-only
    controls (server/avatar images) often expose only generic names — hover
    them (`win.ax.hover`) and read the tooltip from a `win.see()`. If a dump
    still comes back near-empty with a `note`, go straight to screenshot +
-   coordinate clicks instead of spending more rounds on UIA.
+   normalized coordinate clicks instead of spending more rounds on UIA.
 5. Use `delivery="background"` only for apps already proven to accept it on
    this machine (classic Win32 controls, UIA patterns) — it is the quiet
    opt-in, not the default to probe with.

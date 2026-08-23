@@ -34,9 +34,9 @@ from .capture import (
 )
 from .controls import Accessibility
 from .inject import (
-    client_to_screen,
     current_foreground,
     force_foreground,
+    point_on_screen,
 )
 from .overlay import LivePointerOverlay
 from .pointer import POINTER_HOTSPOT, pointer_points
@@ -178,6 +178,38 @@ class Windows:
         }
         self._last_window = info
         return hwnd, info
+
+    def _target_hwnd(self, app: str | None) -> tuple[int, dict[str, Any]]:
+        """Resolve the window to inject into, keeping it consistent with the
+        window the coordinate mapping in :meth:`_screen_point` uses.
+
+        :meth:`_screen_point` converts screenshot/normalised/client
+        coordinates against ``self._last_screenshot["hwnd"]``. Injecting into
+        a *different* freshly re-resolved window would fire coordinates
+        computed for window A at window B. So when the caller did not name a
+        different app (or named one that matches the anchored window), reuse
+        the anchored hwnd; only fall back to a fresh resolution when the
+        caller explicitly targets a different window, and re-anchor then.
+        """
+        if app and self._last_window:
+            target = self._last_window
+            needle = str(app).casefold()
+            matches = (
+                needle == str(target["hwnd"]).casefold()
+                or needle == target["process"].casefold()
+                or needle == target["process"].removesuffix(".exe").casefold()
+                or needle == target["title"].casefold()
+            )
+            if not matches:
+                # User asked for a different window: resolve and re-anchor so
+                # the screenshot coordinate basis follows the new target.
+                return self._resolve_hwnd(app)
+            return target["hwnd"], target
+        if app:
+            return self._resolve_hwnd(app)
+        if self._last_window:
+            return self._last_window["hwnd"], self._last_window
+        raise HarnessError("Specify an app name, exe name, title, or HWND")
 
     # --- element handles ------------------------------------------------------
 
@@ -401,8 +433,18 @@ class Windows:
                 "coordinate_space must be 'screenshot', 'normalized', "
                 "'client', or 'screen'"
             )
-        screen_x, screen_y = client_to_screen(shot["hwnd"], x, y)
-        return float(screen_x), float(screen_y)
+        # Anchor the conversion to the client origin captured at screenshot
+        # time (shot["client_bounds"] records x,y as the on-screen client
+        # origin). Relying on a live ClientToScreen here re-reads the window's
+        # current placement, which can be a transient off-screen value (e.g.
+        # -32000,-32000 during an iconified/foreground handoff) and would make
+        # a screenshot-space click fly off the virtual desktop. The frozen
+        # bounds are the same geometry the screenshot was built from, so the
+        # mapping stays consistent with the image the agent is looking at.
+        bounds = shot["client_bounds"]
+        screen_x = float(bounds["x"]) + x
+        screen_y = float(bounds["y"]) + y
+        return screen_x, screen_y
 
     def _pointer_info(self) -> dict[str, Any] | None:
         if self._pointer_position is None:
@@ -469,7 +511,7 @@ class Windows:
         dismisses the tooltip before anyone can read it; follow with
         ``win.see()`` to read it.
         """
-        hwnd, _info = self._resolve_hwnd(app)
+        hwnd, _info = self._target_hwnd(app)
         point = self._screen_point(x, y, coordinate_space)
         self._pointer_position = point
         self._overlay.move(*point)
@@ -493,7 +535,7 @@ class Windows:
     ) -> dict[str, Any]:
         """Coordinate click; foreground (default) fronts and holds the target,
         background routes pen/message without disturbing the user."""
-        hwnd, info = self._resolve_hwnd(app)
+        hwnd, info = self._target_hwnd(app)
         point = self._screen_point(x, y, coordinate_space)
         focus_before = current_foreground()
         self._pointer_position = point
@@ -525,7 +567,7 @@ class Windows:
         delivery: str = "foreground",
         hold: bool = True,
     ) -> dict[str, Any]:
-        hwnd, _info = self._resolve_hwnd(app)
+        hwnd, _info = self._target_hwnd(app)
         start = self._screen_point(from_x, from_y, coordinate_space)
         end = self._screen_point(to_x, to_y, coordinate_space)
         focus_before = current_foreground()
@@ -553,7 +595,7 @@ class Windows:
     ) -> dict[str, Any]:
         if not delta_y and not delta_x:
             raise HarnessError("Provide a nonzero delta_y or delta_x")
-        hwnd, _info = self._resolve_hwnd(app)
+        hwnd, _info = self._target_hwnd(app)
         if (x is None) != (y is None):
             raise HarnessError("Provide both x and y when targeting a scroll point")
         if x is not None and y is not None:
@@ -563,6 +605,14 @@ class Windows:
 
             bounds = client_bounds(hwnd)
             point = (bounds[0] + bounds[2] / 2.0, bounds[1] + bounds[3] / 2.0)
+            # A transient client-bounds read during a foreground/cloak handoff
+            # can land the "center" off the virtual desktop (large negative
+            # coords); that would silently scroll nothing. Fall back to the
+            # window the last screenshot anchored (same coordinate mapping as
+            # _screen_point) instead of firing into the void.
+            if not point_on_screen(*point) and self._last_screenshot is not None:
+                point = self._screen_point(500.0, 500.0, "normalized")
+                hwnd = self._last_screenshot["hwnd"]
         self._pointer_position = point
         self._overlay.move(*point)
         focus_before = current_foreground()
@@ -587,7 +637,7 @@ class Windows:
         input while focused; passing x/y clicks the field in the same call so
         the focus-then-type sequence cannot be split by a focus loss.
         """
-        hwnd, _info = self._resolve_hwnd(app)
+        hwnd, _info = self._target_hwnd(app)
         if (x is None) != (y is None):
             raise HarnessError("Provide both x and y to focus a field before typing")
         focus_before = current_foreground()

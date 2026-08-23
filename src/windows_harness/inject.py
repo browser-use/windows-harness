@@ -37,6 +37,7 @@ from typing import Callable
 
 from . import delivery
 from .capture import (
+    _PROCESSENTRY32W,
     CWP_SKIPDISABLED,
     CWP_SKIPINVISIBLE,
     CWP_SKIPTRANSPARENT,
@@ -362,6 +363,28 @@ def get_cursor() -> tuple[int, int]:
 
 def current_foreground() -> int:
     return user32.GetForegroundWindow() or 0
+
+
+def point_on_screen(x: float, y: float) -> bool:
+    """True when a physical screen point lies inside the virtual desktop.
+
+    The harness produces physical pixel coordinates; a bad client-bounds read
+    (usually a transient off-screen value during a foreground/cloak handoff)
+    can turn a window center into a large negative point. Callers should bail
+    to a known-good anchor rather than scroll/click a point that is not on any
+    monitor.
+    """
+    SM_XVIRTUALSCREEN = 76
+    SM_YVIRTUALSCREEN = 77
+    SM_CXVIRTUALSCREEN = 78
+    SM_CYVIRTUALSCREEN = 79
+    left = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+    top = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+    width = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+    height = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+    if width <= 0 or height <= 0:
+        return False
+    return left <= x < left + width and top <= y < top + height
 
 
 def _root_ancestor(hwnd: int) -> int:
@@ -699,21 +722,6 @@ _HOOK_SUSPECTS = frozenset({
 })
 
 _TH32CS_SNAPPROCESS = 0x2
-
-
-class _PROCESSENTRY32W(ctypes.Structure):
-    _fields_ = (
-        ("dwSize", wt.DWORD),
-        ("cntUsage", wt.DWORD),
-        ("th32ProcessID", wt.DWORD),
-        ("th32DefaultHeapID", ctypes.c_size_t),
-        ("th32ModuleID", wt.DWORD),
-        ("cntThreads", wt.DWORD),
-        ("th32ParentProcessID", wt.DWORD),
-        ("pcPriClassBase", wt.LONG),
-        ("dwFlags", wt.DWORD),
-        ("szExeFile", wt.WCHAR * 260),
-    )
 
 
 def suspect_injectors() -> list[str]:
