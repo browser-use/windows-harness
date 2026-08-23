@@ -602,21 +602,21 @@ def capture_window(hwnd: int) -> dict:
 
 
 def _looks_blank(image: Image.Image) -> bool:
-    """True when the frame is a solid wash of black or white.
+    """True when the frame is a solid wash (one dominant luma value).
 
-    A composited/DWM window that PrintWindow cannot read often succeeds
-    without error and paints its own DC background — frequently pure white
-    (Tencent Video) or pure black (WebView2) instead of raising. That wash is
-    just as "no content" as an all-black frame, so it must trigger the
-    screen-region fallback too; otherwise a blank white screenshot is returned
-    as a "successful" capture.
+    A composited/DWM window that PrintWindow cannot read often succeeds without
+    error and paints its own DC background instead of raising -- pure white
+    (Tencent Video), pure black (WebView2), or a flat dark grey such as the
+    Electron/Chromium un-painted background (a near-solid ~18 luma frame). Any
+    of those is "no content", so it must trigger the screen-region fallback;
+    otherwise a blank screenshot is returned as a "successful" capture. A real
+    frame spreads across many luma levels, so a single-bin dominance is a safe
+    blank signal and will not misfire on genuine dark content.
     """
     grey = image.convert("L")
     histogram = grey.histogram()
     total = float(grey.width * grey.height)
-    dark_pixels = sum(histogram[:16])
-    bright_pixels = sum(histogram[240:])
-    return max(dark_pixels, bright_pixels) / total > 0.995
+    return max(histogram) / total > 0.98
 
 
 def png_size(path: Path) -> tuple[int, int]:
