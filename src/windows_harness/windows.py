@@ -14,6 +14,7 @@ injection or window messages, never fronts, and refuses with
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 import time
@@ -22,6 +23,7 @@ from typing import Any
 
 from . import delivery
 from . import inject
+from .annotation import annotate as annotate_image
 from .capture import (
     HarnessError,
     capture_window,
@@ -48,10 +50,8 @@ try:
 except Exception:  # pragma: no cover
     _IS_ADMIN = False
 
-
 class FocusChangedError(HarnessError):
     """A background-targeted action disturbed the user's foreground."""
-
 
 def _click_delivery_hint(result: dict[str, Any], hwnd: int) -> str | None:
     """Posted clicks against WebView2/Tauri hosts are often silently ignored;
@@ -66,7 +66,6 @@ def _click_delivery_hint(result: dict[str, Any], hwnd: int) -> str | None:
         )
     return None
 
-
 # UIA element handles are retired once the table outgrows this; evicted
 # indices fail with an honest error instead of pinning COM references forever.
 _ELEMENT_CACHE_LIMIT = 4096
@@ -77,6 +76,28 @@ _ELEMENT_CACHE_LIMIT = 4096
 # `%TEMP%\windows-harness-*.png` manually if they pile up.
 _TEMP_SHOT_PREFIX = "windows-harness-"
 
+def _env_bool(name: str, *, default: bool = True) -> bool:
+    """Read a true/false environment flag; empty values keep the default."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().casefold() not in ("off", "0", "false", "no")
+
+def _click_label(button: str, clicks: int) -> str:
+    if clicks != 1:
+        return f"{clicks}x {button} click"
+    if button == "left":
+        return "click"
+    return f"{button} click"
+
+def _scroll_label(delta_y: int, delta_x: int) -> str:
+    parts = []
+    if delta_y:
+        parts.append("up" if delta_y > 0 else "down")
+    if delta_x:
+        parts.append("right" if delta_x > 0 else "left")
+    direction = "/".join(parts) or "scroll"
+    return f"scroll {direction} dy={delta_y} dx={delta_x}"
 
 class Windows:
     """Low-level Windows observation and control for one persistent process."""
@@ -95,6 +116,7 @@ class Windows:
         self._last_screenshot: dict[str, Any] | None = None
         self._pointer_position: tuple[float, float] | None = None
         self._overlay = LivePointerOverlay()
+        self._proof_enabled = _env_bool("WINDOWS_HARNESS_PROOF", default=True)
         self.ax = Accessibility(self)
 
     # --- runtime report ----------------------------------------------------
@@ -292,6 +314,89 @@ class Windows:
             output.parent.mkdir(parents=True, exist_ok=True)
         image.save(output, format="PNG", compress_level=1)
         return output
+
+    def _annotate_proof(
+        self,
+        hwnd: int,
+        point: tuple[float, float],
+        *,
+        kind: str,
+        label: str,
+        coordinate_space: str,
+        delta: dict[str, float] | None = None,
+        end: tuple[float, float] | None = None,
+        annotate: bool = True,
+    ) -> dict[str, Any] | None:
+        """Stamp an action's intended point onto a screenshot and return it.
+
+        Reuses the screenshot the coordinates were anchored to (so the marker
+        is pixel-exact against the image the agent reasoned over), and falls
+        back to a fresh capture of the target window when no matching
+        screenshot is held in memory. The source screenshot is never mutated
+        on disk; the annotated copy is written to a new temp path.
+        """
+        if not (annotate and self._proof_enabled):
+            return None
+        from PIL import Image
+
+        try:
+            shot = self._last_screenshot
+            image: Image.Image | None = None
+            if shot is not None and shot.get("hwnd") == hwnd and shot.get("path"):
+                try:
+                    image = Image.open(shot["path"])
+                    image.load()
+                except OSError:
+                    image = None
+            if image is not None:
+                bounds = shot["client_bounds"]
+                scale_x = float(shot["scale_x"])
+                scale_y = float(shot["scale_y"])
+            else:
+                fresh = capture_window(hwnd)
+                image = fresh["image"]
+                bounds = fresh["client_bounds"]
+                scale_x = float(fresh["scale_x"])
+                scale_y = float(fresh["scale_y"])
+
+            image_x = (point[0] - bounds["x"]) * scale_x
+            image_y = (point[1] - bounds["y"]) * scale_y
+            actions: list[dict[str, Any]] = [
+                {"kind": kind, "x": image_x, "y": image_y, "label": label}
+            ]
+            if delta:
+                actions[0]["delta_x"] = float(delta.get("delta_x", 0))
+                actions[0]["delta_y"] = float(delta.get("delta_y", 0))
+            if end is not None:
+                actions[0]["end_x"] = (end[0] - bounds["x"]) * scale_x
+                actions[0]["end_y"] = (end[1] - bounds["y"]) * scale_y
+
+            annotate_image(image, actions)
+            output = self._save_shot(image, None)
+            proof: dict[str, Any] = {
+                "path": str(output),
+                "kind": kind,
+                "label": label,
+                "coordinate_space": coordinate_space,
+                "image": {"x": round(image_x, 1), "y": round(image_y, 1)},
+                "screen": {"x": round(point[0], 1), "y": round(point[1], 1)},
+            }
+            if delta:
+                proof["delta"] = {
+                    key: round(delta[key], 1)
+                    for key in ("delta_x", "delta_y")
+                    if key in delta
+                }
+            if end is not None:
+                proof["end"] = {
+                    "x": round((end[0] - bounds["x"]) * scale_x, 1),
+                    "y": round((end[1] - bounds["y"]) * scale_y, 1),
+                }
+            return proof
+        except Exception:
+            # The proof is best-effort: a capture/encode failure must never
+            # turn a successful coordinate action into a reported failure.
+            return None
 
     def capture_screenshot(
         self,
@@ -500,6 +605,7 @@ class Windows:
         coordinate_space: str = "screenshot",
         delivery: str = "foreground",
         hold: bool = True,
+        annotate: bool = True,
     ) -> dict[str, Any]:
         """Really hover the point so tooltips and hover states fire.
 
@@ -515,9 +621,16 @@ class Windows:
         point = self._screen_point(x, y, coordinate_space)
         self._pointer_position = point
         self._overlay.move(*point)
-        return inject.hover_screen(
+        result = inject.hover_screen(
             hwnd, point, delivery_mode=delivery, hold=hold, dwell=dwell
         )
+        proof = self._annotate_proof(
+            hwnd, point, kind="hover", label="hover",
+            coordinate_space=coordinate_space, annotate=annotate,
+        )
+        if proof:
+            result["proof"] = proof
+        return result
 
     # --- input primitives --------------------------------------------------
 
@@ -532,6 +645,7 @@ class Windows:
         coordinate_space: str = "screenshot",
         delivery: str = "foreground",
         hold: bool = True,
+        annotate: bool = True,
     ) -> dict[str, Any]:
         """Coordinate click; foreground (default) fronts and holds the target,
         background routes pen/message without disturbing the user."""
@@ -550,6 +664,13 @@ class Windows:
         hint = _click_delivery_hint(result, hwnd)
         if hint:
             result["hint"] = hint
+        proof = self._annotate_proof(
+            hwnd, point, kind="click",
+            label=_click_label(button, clicks),
+            coordinate_space=coordinate_space, annotate=annotate,
+        )
+        if proof:
+            result["proof"] = proof
         return result
 
     def drag(
@@ -566,6 +687,7 @@ class Windows:
         steps: int = 12,
         delivery: str = "foreground",
         hold: bool = True,
+        annotate: bool = True,
     ) -> dict[str, Any]:
         hwnd, _info = self._target_hwnd(app)
         start = self._screen_point(from_x, from_y, coordinate_space)
@@ -579,6 +701,13 @@ class Windows:
             delivery_mode=delivery, hold=hold,
         )
         result["focus"] = self._focus_outcome(focus_before, "drag", delivery=delivery, hold=hold)
+        proof = self._annotate_proof(
+            hwnd, start, kind="drag", label="drag",
+            coordinate_space=coordinate_space,
+            end=end, annotate=annotate,
+        )
+        if proof:
+            result["proof"] = proof
         return result
 
     def scroll(
@@ -592,6 +721,7 @@ class Windows:
         coordinate_space: str = "screenshot",
         delivery: str = "foreground",
         hold: bool = True,
+        annotate: bool = True,
     ) -> dict[str, Any]:
         if not delta_y and not delta_x:
             raise HarnessError("Provide a nonzero delta_y or delta_x")
@@ -618,6 +748,15 @@ class Windows:
         focus_before = current_foreground()
         result = inject.scroll(hwnd, point, delta_y, delta_x, delivery_mode=delivery, hold=hold)
         result["focus"] = self._focus_outcome(focus_before, "scroll", delivery=delivery, hold=hold)
+        proof = self._annotate_proof(
+            hwnd, point, kind="scroll",
+            label=_scroll_label(delta_y, delta_x),
+            coordinate_space=coordinate_space,
+            delta={"delta_x": delta_x, "delta_y": delta_y},
+            annotate=annotate,
+        )
+        if proof:
+            result["proof"] = proof
         return result
 
     def type(
@@ -630,6 +769,7 @@ class Windows:
         coordinate_space: str = "screenshot",
         delivery: str = "foreground",
         hold: bool = True,
+        annotate: bool = True,
     ) -> dict[str, Any]:
         """Type text, optionally focusing a field at (x, y) first.
 
@@ -641,8 +781,10 @@ class Windows:
         if (x is None) != (y is None):
             raise HarnessError("Provide both x and y to focus a field before typing")
         focus_before = current_foreground()
+        focus_point: tuple[float, float] | None = None
         if x is not None and y is not None:
             point = self._screen_point(x, y, coordinate_space)
+            focus_point = point
             self._pointer_position = point
             self._overlay.move(*point)
             inject.click_screen(hwnd, point, button="left", clicks=1,
@@ -650,6 +792,13 @@ class Windows:
             time.sleep(0.12)  # let the field's focus handlers settle
         result = inject.type_text(hwnd, text, delivery_mode=delivery, hold=hold)
         result["focus"] = self._focus_outcome(focus_before, "typing", delivery=delivery, hold=hold)
+        if focus_point is not None:
+            proof = self._annotate_proof(
+                hwnd, focus_point, kind="focus", label="click to type",
+                coordinate_space=coordinate_space, annotate=annotate,
+            )
+            if proof:
+                result["proof"] = proof
         return result
 
     def key(self, key: str, *, app: str | None = None, delivery: str = "foreground", hold: bool = True) -> dict[str, Any]:

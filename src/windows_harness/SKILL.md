@@ -197,6 +197,38 @@ exact title, and only then substrings, so a window whose title merely
 mentions the name (a VS Code tab titled "… Discord …") never hijacks the
 query.
 
+## Action proof: look only when it misfires
+
+Every coordinate primitive (`click`, `drag`, `scroll`, `hover`, `type` with
+x/y) stamps the intended point back onto the screenshot it was anchored to and
+returns the path under `result["proof"]["path"]`. The `proof` key is optional:
+it is present only when annotation is on (the default) and the proof was
+actually generated, so read it through `result.get("proof")` before using it.
+
+```python
+out = win.click(640, 420, app="Notepad")
+proof = out.get("proof")
+print(proof["path"] if proof else "no proof")   # annotated PNG you can open
+```
+
+It stays absent for non-coordinate primitives (`key`, `paste`, `move`,
+`ax.click`, `see`) and for any call given `annotate=False`, or when
+`WINDOWS_HARNESS_PROOF=off`.
+
+* `click` / double / right / `hover` / click-to-`type` draw a red reticle
+  (circle-cross) at the point, labelled with the button and count.
+* `scroll` draws an arrow from the anchor point (the window centre whenever
+  `x`/`y` are omitted) in the direction of the wheel delta.
+* `drag` draws the glide as a blue line with a reticle at the start and a
+  square at the end.
+
+Do NOT open the proof on every action — the input already ran. Open it only
+to decide WHY a coordinate action mis-landed: you aimed at the wrong spot, the
+effect did not happen, or you need to nudge a coordinate before retrying. A
+normal `win.see()` on the finished step is the usual confirmation. Pass
+`annotate=False` to any primitive (or set `WINDOWS_HARNESS_PROOF=off`) to turn
+the proof off for a coordinate you already know is good.
+
 ## Minimize round trips
 
 - Bundle deterministic, reversible steps into one program, then verify once.

@@ -515,3 +515,129 @@ def test_foreground_key_bare_key_falls_back_but_combo_refuses(monkeypatch):
     assert result["mode"] == "foreground-message"
     with pytest.raises(inject.ForegroundError):
         inject.foreground_key(1, "ctrl+a", cloak=True)
+
+
+def test_annotate_stamps_markers_onto_image():
+    """The action-proof renderer draws a reticle and a direction arrow."""
+    from PIL import Image
+
+    from windows_harness.annotation import annotate
+
+    image = Image.new("RGB", (400, 300), (240, 240, 240))
+    annotate(
+        image,
+        [
+            {"kind": "click", "x": 100, "y": 100, "label": "click"},
+            {"kind": "scroll", "x": 200, "y": 100, "delta_y": 360, "delta_x": 0},
+        ],
+    )
+    px = image.load()
+    assert px[100, 100] == (255, 45, 45)          # click reticle centre
+    assert px[200, 100 - 40] == (255, 45, 45)     # up arrow (positive delta_y)
+
+
+def test_scroll_arrow_points_with_wheel_sign():
+    """Positive delta_y = scroll up = arrow above the anchor; negative = down."""
+    from PIL import Image
+
+    from windows_harness.annotation import annotate
+
+    down = Image.new("RGB", (300, 300), (240, 240, 240))
+    annotate(down, [{"kind": "scroll", "x": 150, "y": 150, "delta_y": -360, "delta_x": 0}])
+    px = down.load()
+    assert px[150, 150] == (255, 45, 45)
+    assert px[150, 150 + 30] == (255, 45, 45)     # below the anchor
+    assert px[150, 150 - 30] == (240, 240, 240)   # nothing above for a down scroll
+
+
+def test_annotate_drag_draws_start_and_path():
+    """A drag is a blue line from the start reticle to the end square."""
+    from PIL import Image
+
+    from windows_harness.annotation import annotate
+
+    image = Image.new("RGB", (300, 300), (240, 240, 240))
+    annotate(image, [{"kind": "drag", "x": 60, "y": 200, "end_x": 220, "end_y": 220, "label": "drag"}])
+    px = image.load()
+    assert px[60, 200] == (60, 140, 255)          # start reticle centre
+    assert px[140, 210] == (60, 140, 255)         # mid-glide line
+
+
+def test_annotate_proof_maps_screen_point_to_image(tmp_path):
+    """The proof reuses the anchored screenshot and returns a readable path."""
+    from PIL import Image
+
+    from windows_harness.windows import Windows
+
+    win = Windows.__new__(Windows)
+    win._proof_enabled = True
+    shot = tmp_path / "shot.png"
+    Image.new("RGB", (300, 200), (200, 200, 200)).save(shot)
+    win._last_screenshot = {
+        "hwnd": 42,
+        "path": str(shot),
+        "width": 300,
+        "height": 200,
+        "scale_x": 1.0,
+        "scale_y": 1.0,
+        "client_bounds": {"x": 10, "y": 20, "width": 300, "height": 200},
+    }
+    proof = win._annotate_proof(
+        42, (110.0, 120.0), kind="click", label="click",
+        coordinate_space="screenshot", annotate=True,
+    )
+    assert os.path.exists(proof["path"])
+    assert proof["image"] == {"x": 100.0, "y": 100.0}
+    assert proof["screen"] == {"x": 110.0, "y": 120.0}
+    assert proof["kind"] == "click"
+    # The anchored source screenshot is untouched; the proof is a new file.
+    assert proof["path"] != str(shot)
+
+
+def test_annotate_proof_respects_flags(tmp_path):
+    """annotate=False or a disabled instance returns no proof path."""
+    from PIL import Image
+
+    from windows_harness.windows import Windows
+
+    win = Windows.__new__(Windows)
+    win._proof_enabled = True
+    shot = tmp_path / "shot.png"
+    Image.new("RGB", (300, 200), (200, 200, 200)).save(shot)
+    win._last_screenshot = {
+        "hwnd": 42, "path": str(shot), "width": 300, "height": 200,
+        "scale_x": 1.0, "scale_y": 1.0,
+        "client_bounds": {"x": 10, "y": 20, "width": 300, "height": 200},
+    }
+    assert win._annotate_proof(
+        42, (110.0, 120.0), kind="click", label="click",
+        coordinate_space="screenshot", annotate=False,
+    ) is None
+    win._proof_enabled = False
+    assert win._annotate_proof(
+        42, (110.0, 120.0), kind="click", label="click",
+        coordinate_space="screenshot", annotate=True,
+    ) is None
+
+
+def test_proof_env_flag(monkeypatch):
+    """WINDOWS_HARNESS_PROOF turns the proof renderer off globally."""
+    from windows_harness import windows as windows_module
+
+    monkeypatch.delenv("WINDOWS_HARNESS_PROOF", raising=False)
+    assert windows_module._env_bool("WINDOWS_HARNESS_PROOF", default=True) is True
+    monkeypatch.setenv("WINDOWS_HARNESS_PROOF", "off")
+    assert windows_module._env_bool("WINDOWS_HARNESS_PROOF", default=True) is False
+    monkeypatch.setenv("WINDOWS_HARNESS_PROOF", "0")
+    assert windows_module._env_bool("WINDOWS_HARNESS_PROOF", default=True) is False
+
+
+def test_action_label_helpers():
+    """Click/scroll labels describe the button, count, and wheel direction."""
+    from windows_harness.windows import _click_label, _scroll_label
+
+    assert _click_label("left", 1) == "click"
+    assert _click_label("right", 1) == "right click"
+    assert _click_label("left", 2) == "2x left click"
+    assert _scroll_label(360, 0) == "scroll up dy=360 dx=0"
+    assert _scroll_label(-120, 120) == "scroll down/right dy=-120 dx=120"

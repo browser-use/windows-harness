@@ -104,6 +104,9 @@ primitives and writes the rest.
   read-back), foreground Unicode input, and clipboard paste — the route that
   still lands when hook software swallows every injected keystroke
 - Draws an animated, click-through pointer without moving your real cursor
+- Stamps an action-proof screenshot for every coordinate primitive (a circle-cross
+  reticle for clicks/hovers, an arrow for scrolls, a line for drags) and returns
+  the path under `result["proof"]["path"]` so an agent can check a mis-landed point
 - Exposes raw UI Automation when vision is not enough
 - Keeps ordinary Python, PowerShell, and the local filesystem within reach
 
