@@ -24,7 +24,7 @@ files.
 Paste this into Codex or Claude Code:
 
 ```text
-Install or upgrade Windows Harness from https://github.com/warmshao/windows-harness
+Install or upgrade Windows Harness from https://github.com/browser-use/windows-harness
 with uv using Python 3.12. Register the skill printed by `windows-harness skill`,
 then run `windows-harness doctor`. Finally, verify the harness by capturing one
 already-running app without bringing it to the foreground.

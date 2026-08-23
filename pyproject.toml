@@ -33,7 +33,7 @@ dependencies = [
 windows-harness = "windows_harness.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/warmshao/windows-harness"
+Homepage = "https://github.com/browser-use/windows-harness"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/windows_harness"]
