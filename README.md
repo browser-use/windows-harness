@@ -1,4 +1,4 @@
-# Windows Harness ⊞
+# Windows Harness
 
 The simplest, thinnest harness that gives an LLM complete freedom to complete
 virtually any task on a PC.
