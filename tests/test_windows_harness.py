@@ -740,6 +740,28 @@ def test_text_landed_detects_dropped_chars():
     assert _text_landed("anything", "") is True
 
 
+def test_text_landed_with_before_snapshot():
+    """With a before/after pair, _text_landed confirms mid-document inserts by
+    presence-or-delta and flags a burst the document contradicts (the
+    session-restore race from issue #1)."""
+    typed = "hello world"
+    before = "x" * 999
+    # Typed into the middle of existing content: present now, absent before.
+    assert _text_landed("x" * 500 + typed + "x" * 488, typed, before=before) is True
+    # Typed at the end of existing content.
+    assert _text_landed(before + typed, typed, before=before) is True
+    # Payload already present elsewhere: confirmed by insertion delta.
+    already = typed + "x" * 999
+    assert _text_landed(typed + "x" * 500 + typed + "x" * 499, typed, before=already) is True
+    # The restore race: the doc grew by only a mangled fragment of the burst.
+    assert _text_landed(before + "hel", typed, before=before) is False
+    # Nothing landed at all.
+    assert _text_landed(before, typed, before=before) is False
+    # CRLF payload vs CRLF document: delta compares on normalized newlines.
+    multiline = "line one\r\nline two"
+    assert _text_landed(before + "prefix\r\nline one\r\nline two", multiline, before=before + "prefix") is True
+
+
 def test_normalize_newlines_collapses_crlf():
     assert _normalize_newlines("a\r\nb\rc") == "a\nb\nc"
     assert _normalize_newlines("plain") == "plain"
