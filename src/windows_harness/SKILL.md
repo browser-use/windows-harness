@@ -1,6 +1,6 @@
 ---
 name: windows-harness
-description: Control a whole Windows desktop from one persistent Python session with foreground-first input (focus holding, SendInput with pen/message fallbacks), background screenshots, UI Automation, clipboard paste, PowerShell, and filesystem access. Use for native, Electron, browser, dialog, file, or cross-app tasks.
+description: Control a whole Windows desktop from one persistent Python session with foreground-first input (focus holding, SendInput with pen/message fallbacks), background screenshots, UI Automation, Browser Harness, clipboard paste, PowerShell, and filesystem access. Use for native, Electron, browser, dialog, file, or cross-app tasks.
 ---
 
 # Windows Harness
@@ -16,8 +16,9 @@ print(win.see(app))
 PY
 ```
 
-The CLI preloads `win`, `Path`, and `subprocess`. Prefer bounded stdin programs;
-reserve `windows-harness repl` for manual exploration and always exit it.
+The CLI preloads `win`, lazy `browser`, `Path`, and `subprocess`. Prefer bounded
+stdin programs; reserve `windows-harness repl` for manual exploration and always
+exit it.
 
 ## How to invoke: exactly two forms
 
@@ -33,7 +34,7 @@ Anything multi-step — write a `.py` file, then run it. No quoting or encoding
 traps in any shell; this is always the most reliable channel:
 
 ```bash
-windows-harness run task.py          # win, Path, subprocess preloaded
+windows-harness run task.py          # win, browser, Path, subprocess preloaded
 ```
 
 Write generated task scripts to the harness scripts dir (printed by
@@ -342,9 +343,16 @@ with repeated keys, clicks, deletion loops, or bulk input.
 
 ## Browser tasks
 
-Drive browsers through CDP (Playwright, browser-use, `--remote-debugging-port`)
-whenever the task lives inside a web page. Do not substitute OS input for CDP
-inside web content; keep these primitives for dialogs, downloads, and
-everything outside the page.
+Use the preloaded lazy `browser` object whenever the task lives inside a web
+page. It exposes Browser Harness helpers and connects to the real browser on
+first use:
+
+```python
+print(browser.page_info())
+browser.new_tab("https://example.com")
+```
+
+Do not substitute OS input for CDP inside web content; keep Windows primitives
+for browser chrome, native dialogs, downloads, and everything outside the page.
 
 Run `windows-harness doctor` to inspect the runtime without changing anything.

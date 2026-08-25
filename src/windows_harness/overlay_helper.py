@@ -23,7 +23,7 @@ import threading
 import tkinter as tk
 
 from .capture import ensure_dpi_awareness
-from .pointer import POINTER_HOTSPOT, POINTER_HEIGHT, POINTER_WIDTH, pointer_points
+from .pointer import POINTER_HEIGHT, POINTER_HOTSPOT, POINTER_WIDTH, pointer_points
 
 
 def _arrow_image(*, pressed: bool) -> bytes:
@@ -81,7 +81,6 @@ class PointerOverlay:
 
     def _make_click_through(self) -> None:
         import ctypes
-        import ctypes.wintypes as wt
 
         GWL_EXSTYLE = -20
         WS_EX_LAYERED = 0x80000

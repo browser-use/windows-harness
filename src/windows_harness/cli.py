@@ -1,4 +1,4 @@
-"""One Python execution surface for Windows apps, files, and PowerShell."""
+"""One Python execution surface for browsers, Windows apps, files, and PowerShell."""
 
 from __future__ import annotations
 
@@ -8,18 +8,23 @@ import json
 import os
 import subprocess
 import sys
+import time
 from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from .browser import BrowserHarness
 from .capture import HarnessError
 from .delivery import scripts_dir
+from .telemetry import capture_cli
+from .telemetry import run_cli as run_telemetry_cli
 from .windows import Windows
 
 
 def _namespace() -> dict[str, Any]:
     return {
         "__name__": "__windows_harness__",
+        "browser": BrowserHarness(),
         "win": Windows(),
         "Path": Path,
         "subprocess": subprocess,
@@ -107,12 +112,14 @@ def _agent_meta_text() -> str:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="windows-harness",
-        description="Execute Python with Windows app control and filesystem access.",
+        description=(
+            "Execute Python with browser, Windows app, PowerShell, and filesystem access."
+        ),
         epilog=(
             "Typical usage (identical in PowerShell, cmd, and bash):\n"
             "  windows-harness see 'Notepad'\n"
             "  windows-harness apps\n"
-            "  windows-harness run task.py        # win, Path, subprocess preloaded\n"
+            "  windows-harness run task.py        # win, browser, Path, subprocess preloaded\n"
             "  windows-harness exec \"print(len(win.list_apps()))\"\n"
             "\n"
             "Note: '<<' heredocs are bash-only; write a .py file and use run instead."
@@ -130,14 +137,23 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subparsers.add_parser("repl", help="start a persistent interactive Python session")
     execute = subparsers.add_parser(
-        "exec", help="execute one Python snippet with win ready (argv-only)"
+        "exec", help="execute one Python snippet with win and browser ready (argv-only)"
     )
-    execute.add_argument("code", help="Python source; win, Path, subprocess are preloaded")
+    execute.add_argument(
+        "code", help="Python source; win, browser, Path, subprocess are preloaded"
+    )
     runner = subparsers.add_parser(
-        "run", help="execute a Python script file with win ready"
+        "run", help="execute a Python script file with win and browser ready"
     )
-    runner.add_argument("script", help="path to a .py file; win, Path, subprocess are preloaded")
+    runner.add_argument(
+        "script",
+        help="path to a .py file; win, browser, Path, subprocess are preloaded",
+    )
     subparsers.add_parser("skill", help="print the Windows Harness skill")
+    telemetry = subparsers.add_parser(
+        "telemetry", help="inspect or change anonymous telemetry"
+    )
+    telemetry.add_argument("action", nargs="?", choices=("status", "enable", "disable"))
     install = subparsers.add_parser("install-skill", help="install the skill into your agent skills directory")
     install.add_argument("--target", help="custom skills directory (e.g. ~/.claude/skills/windows-harness)")
     see = subparsers.add_parser("see", help="capture a bounded application window")
@@ -162,30 +178,40 @@ def main(argv: list[str] | None = None) -> int:
     _tame_stdio()
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.command == "telemetry":
+        return run_telemetry_cli([args.action] if args.action else [])
+
+    started = time.monotonic()
+    exit_code: int | None = None
     try:
         if args.command == "doctor":
             print(json.dumps(Windows().doctor(), indent=2))
-            return 0
+            exit_code = 0
+            return exit_code
         if args.command == "apps":
             # Compact JSON: one line per process keeps the inventory inside
             # agent output limits; indent=2 tripled the token cost.
             print(json.dumps(Windows().list_apps(include_system=args.all), ensure_ascii=False))
-            return 0
+            exit_code = 0
+            return exit_code
         if args.command == "install-skill":
-            return _install_skill(getattr(args, "target", None))
+            exit_code = _install_skill(getattr(args, "target", None))
+            return exit_code
         if args.command == "skill":
             print(_skill_text(), end="")
-            return 0
+            exit_code = 0
+            return exit_code
         if args.command == "repl":
             code.interact(
                 banner=(
-                    "windows-harness: win.see/key/type/click/ax/script, "
+                    "windows-harness: win.see/key/type/click/ax/script, browser, "
                     "Path, and subprocess are ready"
                 ),
                 local=_namespace(),
                 exitmsg="",
             )
-            return 0
+            exit_code = 0
+            return exit_code
         if args.command == "see":
             result = Windows().see(
                 args.app,
@@ -195,7 +221,8 @@ def main(argv: list[str] | None = None) -> int:
                 bring_to_front=args.bring_to_front,
             )
             print(json.dumps(result, indent=2, ensure_ascii=False))
-            return 0
+            exit_code = 0
+            return exit_code
         if args.command == "state":
             state = Windows().get_app_state(
                 args.app,
@@ -204,9 +231,11 @@ def main(argv: list[str] | None = None) -> int:
                 max_nodes=args.max_nodes,
             )
             print(json.dumps(state, indent=2, ensure_ascii=False, default=str))
-            return 0
+            exit_code = 0
+            return exit_code
         if args.command == "exec":
-            return _execute(args.code)
+            exit_code = _execute(args.code)
+            return exit_code
         if args.command == "run":
             # utf-8-sig: a BOM left by PowerShell editors must not crash the run.
             script = Path(args.script).expanduser()
@@ -221,22 +250,27 @@ def main(argv: list[str] | None = None) -> int:
             except OSError as exc:
                 print(f"windows-harness: cannot read {script}: {exc}", file=sys.stderr)
                 return 1
-            return _execute(source)
+            exit_code = _execute(source)
+            return exit_code
         if args.command is None:
             if sys.stdin.isatty():
                 parser.print_help()
-                return 2
-            return _execute(sys.stdin.read())
+                exit_code = 2
+                return exit_code
+            exit_code = _execute(sys.stdin.read())
+            return exit_code
         parser.error(f"unknown command: {args.command}")
     except (HarnessError, RuntimeError) as exc:
         print(f"windows-harness: {exc}", file=sys.stderr)
-        return 1
+        exit_code = 1
+        return exit_code
+    finally:
+        capture_cli(
+            args.command or "python", exit_code == 0, time.monotonic() - started
+        )
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
-
 

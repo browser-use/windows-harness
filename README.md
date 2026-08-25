@@ -26,12 +26,12 @@ files.
 Paste this into Codex or Claude Code:
 
 ```text
-Install or upgrade Windows Harness from https://github.com/browser-use/windows-harness
-with uv using Python 3.12. Register its agent skill with `windows-harness install-skill`
-(by default it installs into `~/.agents`, `~/.codex`, `~/.claude` and `~/.cursor`; use
-`--target <dir>` to install into one specific skills directory instead), then run
-`windows-harness doctor`. Finally, verify the harness by capturing one already-running
-app without bringing it to the foreground.
+Install or upgrade Windows Harness from PyPI with uv using Python 3.12. Register
+its agent skill with `windows-harness install-skill` (by default it installs into
+`~/.agents`, `~/.codex`, `~/.claude` and `~/.cursor`; use `--target <dir>` to
+install into one specific skills directory instead), then run `windows-harness
+doctor`. Finally, verify the harness by capturing one already-running app without
+bringing it to the foreground.
 ```
 
 That is it. The agent installs the package, teaches itself the workflow, checks
@@ -50,11 +50,13 @@ item = win.ax.at(640, 420, app="Notepad")
 win.script("(Get-Process notepad).Count")
 
 print(list(Path.home().iterdir()))
+print(browser.page_info())
 PY
 ```
 
 Think in `see`, `key`, `type`, `click`, `paste`, `ax`, and `script`. `Path` and
-`subprocess` are ready in the same Python process.
+`subprocess` are ready in the same Python process, and `browser` lazily connects
+Browser Harness to your real logged-in browser.
 
 There are no Spotify tools, Slack tools, or Excel tools. The model gets raw
 primitives and writes the rest.
@@ -66,7 +68,7 @@ primitives and writes the rest.
                                         │
                  ┌──────────────────────┼──────────────────────┐
                  │                      │                      │
-              win.*                 browser via CDP     Path / subprocess
+              win.*                  browser.*          Path / subprocess
                  │                      │                      │
      ┌───────────┼───────────┐     Playwright /        files + shell
      │           │           │     browser-use
@@ -108,6 +110,7 @@ primitives and writes the rest.
   reticle for clicks/hovers, an arrow for scrolls, a line for drags) and returns
   the path under `result["proof"]["path"]` so an agent can check a mis-landed point
 - Exposes raw UI Automation when vision is not enough
+- Uses Browser Harness for the real, logged-in browser
 - Keeps ordinary Python, PowerShell, and the local filesystem within reach
 
 Windows has no public `CGEventPostToPid` equivalent, so the harness is honest
@@ -119,9 +122,19 @@ impossible is refused with a structured reason rather than faked.
 ## Requirements and privacy
 
 `windows-harness doctor` reports what the runtime needs: an interactive
-desktop (not Session 0) and the three Python dependencies. No administrator
+desktop (not Session 0) and the required Python dependencies. No administrator
 rights are required—except to control apps that themselves run elevated
 (UIPI blocks message injection across integrity levels, and the harness
 reports it rather than fighting it).
 
-Experimental. Windows 10 1809+ / Windows 11. MIT licensed.
+Anonymous telemetry is enabled by default. It records only the CLI command
+category, success, duration, package version, OS/architecture, and detected
+agent client. It never records prompts, app names, screenshots, UI text,
+scripts, paths, or window titles.
+
+```powershell
+windows-harness telemetry disable
+```
+
+See the full [installation guide](install.md). Experimental. Windows 10 1809+
+/ Windows 11. [MIT licensed](LICENSE).

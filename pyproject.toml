@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
@@ -7,8 +7,9 @@ name = "windows-harness"
 version = "0.2.2"
 description = "The simplest, thinnest harness that gives an LLM complete freedom to complete virtually any task on Windows."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "warmshao" }]
 keywords = ["agent", "harness", "windows", "automation", "uia", "computer-use"]
 classifiers = [
@@ -17,16 +18,23 @@ classifiers = [
     "Operating System :: Microsoft :: Windows :: Windows 10",
     "Operating System :: Microsoft :: Windows :: Windows 11",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Testing",
 ]
 dependencies = [
+    "browser-harness>=0.1.9",
     "pillow>=10.0",
     "pywin32>=306",
     "uiautomation>=2.0.26",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4",
+    "pyyaml>=6.0",
+    "ruff>=0.12",
 ]
 
 [project.scripts]
@@ -34,6 +42,8 @@ windows-harness = "windows_harness.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/browser-use/windows-harness"
+Repository = "https://github.com/browser-use/windows-harness"
+Issues = "https://github.com/browser-use/windows-harness/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/windows_harness"]
@@ -46,3 +56,10 @@ packages = ["src/windows_harness"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+exclude = ["scripts"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

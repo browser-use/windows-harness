@@ -24,15 +24,15 @@ from windows_harness.delivery import (  # noqa: E402
 from windows_harness.inject import (  # noqa: E402
     _split_scroll_delta,
     _utf16_code_units,
-    parse_combo,
     pack_lparam,
+    parse_combo,
     vk_for_key,
     zip_strict,
 )
 from windows_harness.pointer import POINTER_HOTSPOT, pointer_points  # noqa: E402
 from windows_harness.windows import (  # noqa: E402
-    _text_landed,
     _normalize_newlines,
+    _text_landed,
 )
 
 
@@ -370,7 +370,8 @@ def test_apps_inventory_filters_system_plumbing():
 
 def test_click_hint_flags_webview_hosts(monkeypatch):
     """Message-mode clicks on WebView2 hosts carry an actionable hint."""
-    from windows_harness import delivery, windows as windows_module
+    from windows_harness import delivery
+    from windows_harness import windows as windows_module
 
     monkeypatch.setattr(delivery, "has_chromium_descendant", lambda hwnd: True)
     hint = windows_module._click_delivery_hint({"mode": "message"}, 1234)

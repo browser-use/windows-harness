@@ -21,8 +21,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import delivery
-from . import inject
+from . import delivery, inject
 from .annotation import annotate as annotate_image
 from .capture import (
     HarnessError,
@@ -38,16 +37,15 @@ from .capture import (
     process_dpi_awareness,
     process_image_name,
     resolve_hwnd,
-    virtual_screen_bounds,
     windows_for_process,
 )
 from .controls import Accessibility
 from .inject import (
-    zip_strict,
     current_foreground,
     force_foreground,
     foreground_root_hwnd,
     point_on_screen,
+    zip_strict,
 )
 from .overlay import LivePointerOverlay
 from .pointer import POINTER_HOTSPOT, pointer_points
