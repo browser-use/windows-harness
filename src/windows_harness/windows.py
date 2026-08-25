@@ -112,14 +112,19 @@ def _normalize_newlines(value: str) -> str:
     return value.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _text_landed(read_back: str | None, typed: str) -> bool | None:
-    """Did the typed text make it to the end of the read-back value?
+def _text_landed(
+    read_back: str | None, typed: str, before: str | None = None
+) -> bool | None:
+    """Did the typed text make it into the read-back value?
 
     Returns ``None`` when there is nothing to compare (read-back unavailable)
-    or the result is ambiguous (text present mid-document), ``True`` when the
-    typed text lands at the end (fresh/replaced field), and ``False`` when the
-    field is *shorter* than what was typed -- the signature of a text box that
-    dropped injected characters (XAML/CEF editors).
+    or the result is ambiguous (text present mid-document with no ``before``
+    snapshot), ``True`` when the typed text is confirmed present, and
+    ``False`` when the read-back contradicts the delivery -- either the field
+    is *shorter* than what was typed (the signature of a text box that dropped
+    injected characters, XAML/CEF editors) or, with a ``before`` snapshot,
+    the document neither contains the payload nor grew by its length (the
+    signature of a launch/session-restore race eating the burst).
     """
     if read_back is None:
         return None
@@ -129,6 +134,20 @@ def _text_landed(read_back: str | None, typed: str) -> bool | None:
         return True
     if haystack == needle or haystack.endswith(needle):
         return True
+    if before is not None:
+        before_norm = _normalize_newlines(before).rstrip()
+        # Typed into the middle of existing content: the payload is present
+        # now and was not there before.
+        if needle in haystack and needle not in before_norm:
+            return True
+        # The payload was already present elsewhere in the document (typing a
+        # repeated word); confirm by insertion delta instead of position.
+        grew = len(_normalize_newlines(read_back)) - len(_normalize_newlines(before))
+        if grew >= len(_normalize_newlines(typed)):
+            return True
+        # Both snapshots available and neither presence nor growth confirms
+        # the payload: the text did not land intact.
+        return False
     if len(haystack) < len(needle):
         return False
     # Mid-document or unrelated content: do not guess, only a shorter-than-
@@ -899,6 +918,12 @@ class Windows:
         Focus-driven fields (search boxes with suggestion popups) only accept
         input while focused; passing x/y clicks the field in the same call so
         the focus-then-type sequence cannot be split by a focus loss.
+
+        After a foreground burst the field is read back over UIA and
+        ``verified`` reflects that read-back, not just the transport:
+        ``verified_via`` reports ``"value_pattern"`` (read-back confirmed),
+        ``"clipboard"`` (confirmed after a paste retry), or ``"transport"``
+        (no readable text state; delivery succeeded but is unconfirmed).
         """
         hwnd, _info = self._target_hwnd(app)
         if (x is None) != (y is None):
@@ -913,15 +938,42 @@ class Windows:
             inject.click_screen(hwnd, point, button="left", clicks=1,
                                 delivery_mode=delivery, hold=hold)
             time.sleep(0.12)  # let the field's focus handlers settle
+        read_before: str | None = None
+        if delivery == "foreground":
+            # Snapshot the field's text so the post-type read-back can judge
+            # by insertion delta, not just by tail position — typing into a
+            # document that already has content (a restored Notepad tab) is
+            # invisible to an end-of-text check.
+            read_before, _ = self._read_back_text(hwnd)
         result = inject.type_text(hwnd, text, delivery_mode=delivery, hold=hold)
         if result.get("verified") and delivery == "foreground":
             # XAML/CEF editors accept the keystrokes but silently drop many of
             # them; confirm the text actually landed instead of trusting the
-            # transport. On a mismatch, retry through the verified UIA
-            # ValuePattern path (set_value), then clipboard paste.
+            # transport. On a dropped-field mismatch, retry through the
+            # verified UIA ValuePattern path (set_value), then clipboard paste.
             read_back, element_index = self._read_back_text(hwnd)
-            landed = _text_landed(read_back, text)
-            if landed is False and element_index is not None:
+            landed = _text_landed(read_back, text, before=read_before)
+            if landed is None and read_back is not None:
+                # The editor may still be settling (session restore, async
+                # render); give it a short window to reach its final text
+                # before judging the delivery.
+                deadline = time.monotonic() + 0.75
+                while time.monotonic() < deadline:
+                    time.sleep(0.15)
+                    read_back, element_index = self._read_back_text(hwnd)
+                    landed = _text_landed(read_back, text, before=read_before)
+                    if landed is not None:
+                        break
+            dropped = (
+                landed is False
+                and read_back is not None
+                and len(_normalize_newlines(read_back)) < len(_normalize_newlines(text))
+            )
+            if dropped and element_index is not None:
+                # The field holds less than the payload: an (almost) empty
+                # field dropped the burst, so replacing its whole value is
+                # safe. Never fire set_value against a document with prior
+                # content — it would clobber the user's text.
                 try:
                     self.ax.set_value(element_index, text)
                     retried_via = "set_value"
@@ -930,9 +982,10 @@ class Windows:
                     inject.paste_text(hwnd, delivery_mode="foreground", hold=hold)
                     retried_via = "paste"
                 read_back, element_index = self._read_back_text(hwnd)
-                landed = _text_landed(read_back, text)
+                landed = _text_landed(read_back, text, before=read_before)
                 result["retried_via"] = retried_via
                 result["verified"] = landed is True
+                result["verified_via"] = "value_pattern" if retried_via == "set_value" else "clipboard"
                 result["read_back"] = _normalize_newlines(read_back) if read_back else None
                 hint = (
                     "foreground type did not appear in the field (XAML/CEF text "
@@ -945,6 +998,27 @@ class Windows:
                         f"{hint}; retried via {retried_via} and it still did not "
                         "land. Use win.ax.set_value() directly."
                     )
+            elif landed is True:
+                result["verified_via"] = "value_pattern"
+            elif read_back is None:
+                # No readable text state (control exposes no value): the
+                # transport's verdict stands, honestly marked as unconfirmed
+                # by read-back.
+                result["verified_via"] = "transport"
+            else:
+                # The read-back contradicts the transport: the payload is
+                # neither at the tail, nor newly present, nor matched by the
+                # insertion delta (a launch/session-restore race can eat the
+                # burst while the window reports focus). Report it honestly.
+                result["verified"] = False
+                result["verified_via"] = "value_pattern"
+                result["read_back"] = _normalize_newlines(read_back) if read_back else None
+                result["note"] = (
+                    "read-back does not confirm the typed text landed "
+                    "(window accepted the keystrokes but the text did not "
+                    "appear; possible focus/restore race). Click the field "
+                    "and retry, or use win.paste()."
+                )
         result["focus"] = self._focus_outcome(focus_before, "typing", delivery=delivery, hold=hold)
         if focus_point is not None:
             proof = self._annotate_proof(

@@ -176,7 +176,13 @@ XAML/WinUI text boxes (Win11 Notepad, Settings) and CEF editors drop much of a
 `KEYEVENTF_UNICODE` burst while claiming `verified: True`; the harness reads
 the field back and, on a mismatch, retries via `win.ax.set_value()` (verified)
 or `win.paste()`. If the result carries `"retried_via"`, the keyboard route
-dropped characters and the retry landed them.
+dropped characters and the retry landed them. The result's `verified_via`
+says how `verified` was established: `"value_pattern"`/`"clipboard"` mean a
+read-back confirmed the text, `"transport"` means the target exposes no
+readable text state and only delivery was confirmed. A `verified: false` with
+a `read_back` field means the window accepted the keystrokes but the text did
+not appear (e.g. an app-launch/session-restore race) — click the field and
+retry, or switch to `win.paste()`.
 
 Replacing a field's existing text: there is no reliable select-all keystroke
 on hook-filtered machines (Ctrl+A is a combo and refuses; CEF ignores a
