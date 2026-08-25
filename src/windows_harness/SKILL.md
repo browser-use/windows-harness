@@ -264,7 +264,15 @@ It stays absent for non-coordinate primitives (`key`, `paste`, `move`,
 Do NOT open the proof on every action — the input already ran. Open it only
 to decide WHY a coordinate action mis-landed: you aimed at the wrong spot, the
 effect did not happen, or you need to nudge a coordinate before retrying. A
-normal `win.see()` on the finished step is the usual confirmation. Pass
+normal `win.see()` on the finished step is the usual confirmation.
+
+The concrete trigger: an action reports success (or `verified: true`) but
+`win.verify_change(app)` says nothing changed, or a `win.see()` shows the page
+changed in a way you did not expect. In that case open
+`result["proof"]["path"]` FIRST — before retrying, nudging, or switching
+transports. The reticle on the anchored screenshot tells you at a glance
+whether the input even landed where you intended; guessing from coordinates
+alone just burns rounds. Pass
 `annotate=False` to any primitive (or set `WINDOWS_HARNESS_PROOF=off`) to turn
 the proof off for a coordinate you already know is good.
 
