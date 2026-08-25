@@ -1,0 +1,22 @@
+tests/test_telemetry.py
+  s_f460551f5ff6a2::t_862a95fa3f713f 6-12
+src/windows_harness/telemetry.py
+  s_f460551f5ff6a2::t_8d56607e88a71a 15
+  s_f460551f5ff6a2::t_862a95fa3f713f 14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "a62bf601552e7d6b3cc0393c66f5a1b5146fe595",
+  "prompts": {},
+  "sessions": {
+    "s_f460551f5ff6a2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a034d7-05ff-7a91-a113-b1e522559068",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Gregor Žunič <36313686+gregpr07@users.noreply.github.com>"
+    }
+  }
+}
