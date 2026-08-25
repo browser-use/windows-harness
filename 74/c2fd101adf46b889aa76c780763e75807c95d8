@@ -1,0 +1,54 @@
+src/windows_harness/__init__.py
+  s_f460551f5ff6a2::t_4e4ec396624c01 3,11
+src/windows_harness/SKILL.md
+  s_f460551f5ff6a2::t_0e5cb773d967cd 3,19-21,37,346-356
+.github/workflows/ci.yml
+  s_f460551f5ff6a2::t_4e4ec396624c01 1-21
+tests/test_browser.py
+  s_f460551f5ff6a2::t_4e4ec396624c01 1-33
+.gitignore
+  s_f460551f5ff6a2::t_4eef01019dbada 9
+pyproject.toml
+  s_f460551f5ff6a2::t_b490acc4debfd4 59-65
+  s_f460551f5ff6a2::t_4e4ec396624c01 2,10,12,27,33-39,45-46
+tests/test_telemetry.py
+  s_f460551f5ff6a2::t_4e4ec396624c01 1-38
+  s_f460551f5ff6a2::t_37bbc0780f8fd0 39-54
+src/windows_harness/cli.py
+  s_f460551f5ff6a2::t_4e4ec396624c01 11,16,19-20,27,153-156,181-185,189-190,195-196,198-199,202-203,207,213-214,224-225,234-235,237-238,253-254,258-261,265-270
+  s_f460551f5ff6a2::t_4eef01019dbada 146-150
+  s_f460551f5ff6a2::t_144f079da65ec4 1,115-117,122,140-143
+CONTRIBUTING.md
+  s_f460551f5ff6a2::t_4e4ec396624c01 1-14
+src/windows_harness/agents/openai.yaml
+  s_f460551f5ff6a2::t_89a6a9a343daa8 1,4
+SECURITY.md
+  s_f460551f5ff6a2::t_4e4ec396624c01 1-9
+src/windows_harness/browser.py
+  s_f460551f5ff6a2::t_4e4ec396624c01 1-52
+src/windows_harness/telemetry.py
+  s_f460551f5ff6a2::t_4e4ec396624c01 1-204
+.github/workflows/publish.yml
+  s_f460551f5ff6a2::t_4e4ec396624c01 1-22
+install.md
+  s_f460551f5ff6a2::t_4e4ec396624c01 1-42
+README.md
+  s_f460551f5ff6a2::t_f731a0c36350e1 29-34,53,58-59,71,113,130-140
+  s_f460551f5ff6a2::t_0e5cb773d967cd 125
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "74c2fd101adf46b889aa76c780763e75807c95d8",
+  "prompts": {},
+  "sessions": {
+    "s_f460551f5ff6a2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a034d7-05ff-7a91-a113-b1e522559068",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Gregor Žunič <36313686+gregpr07@users.noreply.github.com>"
+    }
+  }
+}
