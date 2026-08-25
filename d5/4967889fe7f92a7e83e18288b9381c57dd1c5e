@@ -1,0 +1,21 @@
+.github/workflows/publish.yml
+  s_f460551f5ff6a2::t_a39ff6dc582595 17-18
+.github/workflows/ci.yml
+  s_f460551f5ff6a2::t_a39ff6dc582595 14-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "d54967889fe7f92a7e83e18288b9381c57dd1c5e",
+  "prompts": {},
+  "sessions": {
+    "s_f460551f5ff6a2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a034d7-05ff-7a91-a113-b1e522559068",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Gregor Žunič <36313686+gregpr07@users.noreply.github.com>"
+    }
+  }
+}
