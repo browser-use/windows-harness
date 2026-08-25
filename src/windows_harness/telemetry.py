@@ -11,7 +11,8 @@ import uuid
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-POSTHOG_KEY = "phc_nud39qe8UBkoFaMM2RwQ8LPWbWDNQNdPUeGShNTCHVXv"
+# PostHog EU project 256945 (Windows Harness).
+POSTHOG_KEY = "phc_m63HdH4EBrJQap6pHqiSb4vi49tcFk8j4y2ipi5EMsd4"
 POSTHOG_HOST = "https://eu.i.posthog.com"
 DISABLE_ENVS = (
     "WINDOWS_HARNESS_TELEMETRY",

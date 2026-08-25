@@ -3,6 +3,13 @@ from __future__ import annotations
 from windows_harness import telemetry
 
 
+def test_uses_windows_harness_posthog_project() -> None:
+    assert telemetry.POSTHOG_HOST == "https://eu.i.posthog.com"
+    assert telemetry.POSTHOG_KEY == (
+        "phc_m63HdH4EBrJQap6pHqiSb4vi49tcFk8j4y2ipi5EMsd4"
+    )
+
+
 def test_status_creates_anonymous_config(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("WINDOWS_HARNESS_HOME", str(tmp_path / "config"))
 
