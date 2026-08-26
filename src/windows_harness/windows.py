@@ -14,10 +14,12 @@ injection or window messages, never fronts, and refuses with
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +84,14 @@ _ELEMENT_CACHE_LIMIT = 4096
 # exits, so nothing deletes them proactively. Clean
 # `%TEMP%\windows-harness-*.png` manually if they pile up.
 _TEMP_SHOT_PREFIX = "windows-harness-"
+# Action proofs get their own prefix so a forgotten `result["proof"]["path"]`
+# is still recoverable unambiguously via `win.last_proof()`.
+_TEMP_PROOF_PREFIX = "windows-harness-proof-"
+# The proof journal is append-only and self-trimming: once it passes
+# _JOURNAL_MAX_BYTES only the newest _JOURNAL_KEEP_LINES entries survive, so
+# long-lived machines never accumulate an unbounded index.
+_JOURNAL_MAX_BYTES = 256 * 1024
+_JOURNAL_KEEP_LINES = 500
 
 def _env_bool(name: str, *, default: bool = True) -> bool:
     """Read a true/false environment flag; empty values keep the default."""
@@ -374,10 +384,15 @@ class Windows:
                 shot = capture_window(hwnd)
         return hwnd, info, shot
 
-    def _save_shot(self, image: Any, path: str | Path | None) -> Path:
+    def _save_shot(
+        self,
+        image: Any,
+        path: str | Path | None,
+        prefix: str = _TEMP_SHOT_PREFIX,
+    ) -> Path:
         if path is None:
             with tempfile.NamedTemporaryFile(
-                prefix=_TEMP_SHOT_PREFIX, suffix=".png", delete=False
+                prefix=prefix, suffix=".png", delete=False
             ) as handle:
                 output = Path(handle.name)
         else:
@@ -443,7 +458,7 @@ class Windows:
                 actions[0]["end_y"] = (end[1] - bounds["y"]) * scale_y
 
             annotate_image(image, actions)
-            output = self._save_shot(image, None)
+            output = self._save_shot(image, None, prefix=_TEMP_PROOF_PREFIX)
             proof: dict[str, Any] = {
                 "path": str(output),
                 "kind": kind,
@@ -463,11 +478,47 @@ class Windows:
                     "x": round((end[0] - bounds["x"]) * scale_x, 1),
                     "y": round((end[1] - bounds["y"]) * scale_y, 1),
                 }
+            self._journal_proof(proof, hwnd)
             return proof
         except Exception:
             # The proof is best-effort: a capture/encode failure must never
             # turn a successful coordinate action into a reported failure.
             return None
+
+    def _journal_proof(self, proof: dict[str, Any], hwnd: int) -> None:
+        """Append one JSON line to the proof journal; best-effort, never
+        raises — an index hiccup must not affect the returned proof."""
+        try:
+            entry: dict[str, Any] = {
+                "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+                **proof,
+            }
+            last = self._last_window
+            if last and last.get("hwnd") == hwnd:
+                entry["app"] = {
+                    "hwnd": hwnd,
+                    "process": last.get("process"),
+                    "title": last.get("title"),
+                }
+            journal = delivery.proofs_journal()
+            journal.parent.mkdir(parents=True, exist_ok=True)
+            with journal.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            self._rotate_journal(journal)
+        except Exception:  # noqa: BLE001
+            pass
+
+    @staticmethod
+    def _rotate_journal(journal: Path) -> None:
+        try:
+            if journal.stat().st_size <= _JOURNAL_MAX_BYTES:
+                return
+            lines = journal.read_text(encoding="utf-8").splitlines()
+            journal.write_text(
+                "\n".join(lines[-_JOURNAL_KEEP_LINES:]) + "\n", encoding="utf-8"
+            )
+        except OSError:
+            pass
 
     def capture_screen(self, *, path: str | Path | None = None) -> dict[str, Any]:
         """Capture the entire virtual desktop (saved to a PNG, path returned).
@@ -513,6 +564,58 @@ class Windows:
             raise HarnessError("No foreground window")
         hwnd, info = self._resolve_hwnd(str(root))
         return {"hwnd": hwnd, **info}
+
+    def proofs(
+        self,
+        limit: int = 10,
+        *,
+        app: str | None = None,
+        kind: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return recent action proofs, newest first.
+
+        Reads the append-only journal (``proofs.jsonl`` under the config dir,
+        ``WINDOWS_HARNESS_HOME`` overrides the root), so a proof stays
+        recoverable even when the producing call never printed
+        ``result["proof"]["path"]`` — including from a later CLI invocation.
+        Entries whose PNG was deleted are skipped. ``app`` matches process or
+        title as a case-insensitive substring; ``kind`` matches exactly
+        (``click``, ``drag``, ``scroll``, ``hover``, ``focus`` for
+        click-to-type).
+        """
+        journal = delivery.proofs_journal()
+        try:
+            lines = journal.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        needle = app.casefold() if app else None
+        entries: list[dict[str, Any]] = []
+        for line in reversed(lines):
+            if len(entries) >= limit:
+                break
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            path = entry.get("path")
+            if not path or not Path(path).exists():
+                continue
+            if kind and entry.get("kind") != kind:
+                continue
+            if needle:
+                info = entry.get("app") or {}
+                haystack = " ".join(
+                    str(info.get(key) or "") for key in ("process", "title")
+                ).casefold()
+                if needle not in haystack:
+                    continue
+            entries.append(entry)
+        return entries
+
+    def last_proof(self) -> dict[str, Any] | None:
+        """The newest journal entry whose PNG still exists, or None."""
+        recent = self.proofs(limit=1)
+        return recent[0] if recent else None
 
     def capture_screenshot(
         self,
