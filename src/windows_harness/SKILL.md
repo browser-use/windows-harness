@@ -272,7 +272,21 @@ changed in a way you did not expect. In that case open
 `result["proof"]["path"]` FIRST — before retrying, nudging, or switching
 transports. The reticle on the anchored screenshot tells you at a glance
 whether the input even landed where you intended; guessing from coordinates
-alone just burns rounds. Pass
+alone just burns rounds.
+
+Forgot to print the proof path, or need an earlier one? Every proof is
+journaled to `proofs.jsonl` under the harness config dir (default
+`%USERPROFILE%\.windows-harness`) as it is written, so history survives
+across CLI invocations:
+
+```python
+win.last_proof()                      # newest proof whose PNG still exists
+win.proofs(limit=5)                   # recent proofs, newest first
+win.proofs(app="Notepad", kind="click")   # filter by process/title and kind
+```
+
+Each entry carries the same fields as `result["proof"]` plus `ts` and the
+target `app` (process/title); entries whose PNG was cleaned up are skipped. Pass
 `annotate=False` to any primitive (or set `WINDOWS_HARNESS_PROOF=off`) to turn
 the proof off for a coordinate you already know is good.
 

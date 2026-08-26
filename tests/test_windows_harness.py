@@ -325,6 +325,76 @@ def test_default_screenshot_path_persists():
 
 
 @pytest.mark.skipif(not is_interactive_desktop(), reason="no interactive desktop")
+def test_proof_journal_roundtrip_and_recovery(tmp_path, monkeypatch):
+    """A forgotten result["proof"]["path"] is recoverable from the journal:
+    newest-first ordering, app/kind filters, and dead-PNG eviction."""
+    from pathlib import Path
+
+    from windows_harness.windows import Windows
+
+    monkeypatch.setenv("WINDOWS_HARNESS_HOME", str(tmp_path))
+    win = Windows()
+    win._last_window = {
+        "hwnd": 42,
+        "process": "notepad.exe",
+        "title": "Untitled - Notepad",
+    }
+
+    def fake_proof(name, kind, label):
+        png = tmp_path / name
+        png.write_bytes(b"png")
+        return {
+            "path": str(png),
+            "kind": kind,
+            "label": label,
+            "coordinate_space": "screenshot",
+            "image": {"x": 1.0, "y": 2.0},
+            "screen": {"x": 3.0, "y": 4.0},
+        }
+
+    first = fake_proof("first.png", "click", "click")
+    second = fake_proof("second.png", "scroll", "scroll down")
+    win._journal_proof(first, 42)
+    win._journal_proof(second, 42)
+
+    assert (tmp_path / "proofs.jsonl").exists()
+
+    recent = win.proofs()
+    assert [entry["path"] for entry in recent] == [second["path"], first["path"]]
+    assert recent[0]["app"]["process"] == "notepad.exe"
+    assert recent[0]["ts"]
+
+    assert win.last_proof()["path"] == second["path"]
+    assert [e["kind"] for e in win.proofs(kind="click")] == ["click"]
+    assert len(win.proofs(app="notepad")) == 2
+    assert win.proofs(app="calculator") == []
+
+    # A proof whose PNG was cleaned up drops out of the index.
+    Path(second["path"]).unlink()
+    assert win.last_proof()["path"] == first["path"]
+
+
+def test_proof_journal_rotation(tmp_path, monkeypatch):
+    """The journal is bounded: oversize files keep only the newest lines."""
+    import json as json_module
+
+    import windows_harness.windows as windows_module
+    from windows_harness.windows import Windows
+
+    monkeypatch.setattr(windows_module, "_JOURNAL_MAX_BYTES", 100)
+    monkeypatch.setattr(windows_module, "_JOURNAL_KEEP_LINES", 5)
+    journal = tmp_path / "proofs.jsonl"
+    journal.write_text(
+        "".join(json_module.dumps({"n": i}) + "\n" for i in range(20)),
+        encoding="utf-8",
+    )
+    Windows._rotate_journal(journal)
+    lines = journal.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 5
+    assert json_module.loads(lines[-1])["n"] == 19
+
+
+@pytest.mark.skipif(not is_interactive_desktop(), reason="no interactive desktop")
 def test_cli_exec_runs_snippet(capsys):
     """argv-only invocation must work without any stdin plumbing."""
     from windows_harness.cli import main

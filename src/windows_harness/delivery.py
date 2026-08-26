@@ -172,6 +172,14 @@ def scripts_dir() -> Path:
     return config_dir() / "scripts"
 
 
+def proofs_journal() -> Path:
+    """Append-only JSONL index of action proofs (one line per proof), so a
+    proof path stays recoverable even when the producing call never printed
+    it. Lives under the config dir, not %TEMP%, so a temp cleanup cannot take
+    the index down with the images."""
+    return config_dir() / "proofs.jsonl"
+
+
 _OBSERVED_CACHE: tuple[float, dict[str, list[str]]] | None = None
 
 
